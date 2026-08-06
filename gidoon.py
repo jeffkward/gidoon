@@ -1,0 +1,643 @@
+"""gidoon — the turn machinery under a gidoon instance.
+
+No owner names, paths, or project specifics live here — everything
+instance-bound arrives via the TOML config in ~/.config/gidoon/<name>.toml.
+
+The hard-won laws, learned live before this repo was born:
+  - stream_claude uses binary pipes + raw os.read with select(), never a
+    buffered TextIOWrapper — readline() buffers ahead, so the result line
+    can sit in Python's buffer while select() waits on an fd that will
+    never signal again (bit a live daemon before this repo existed).
+  - The `result` event IS the turn's end — never wait for EOF. Under
+    launchd, claude has been seen lingering after completing (open API
+    sockets keep node alive); the finally block reaps or kills leftovers.
+  - The prompt travels over stdin, never argv — an untrusted message that
+    starts with '-' must not be parseable as a CLI flag.
+  - "No conversation found" on stderr while resuming → a distinct
+    resume_failed marker so the caller can drop the dead session id and
+    retry fresh, rather than wedging every future turn. The signature can
+    arrive alongside a clean-looking empty result event, not only on a
+    no-result crash.
+  - collapse_tool_runs / count_suffix / collapse_tool_lines are pure and
+    ported verbatim — they define the status-message checklist rendering.
+
+Stdlib only. Python >= 3.11 (tomllib).
+"""
+import json
+import os
+import plistlib
+import re
+import select
+import signal
+import subprocess
+import time
+import tomllib
+
+CONFIG_DIR = os.path.expanduser("~/.config/gidoon")
+
+DEFAULT_CLAUDE_BIN = "~/.local/bin/claude"
+DEFAULT_EMOJI = "\U0001f5e3"  # 🗣
+DEFAULT_TIMEOUT_SECS = 600
+
+# Appended to the system prompt of EVERY turn (claude --append-system-prompt),
+# so the turn knows what it is before it reads a word of the project's own
+# docs — a project CLAUDE.md written for interactive sessions can otherwise
+# make the mouth act like one (a live instance's first turn once ran its
+# project's session-start checklist and armed a duplicate scheduler cron).
+# Owners can replace it via the `system_prompt` TOML key.
+DEFAULT_SYSTEM_PROMPT = (
+    "The person is talking to you over chat (Telegram), not at a terminal: "
+    "this is a headless conversational turn, and your final answer text is "
+    "relayed to them verbatim — just answer; nothing else you print reaches "
+    "them. You are not this project's scheduler, heartbeat, or deploy "
+    "owner: skip any session-start checklists in the project docs, and "
+    "never create, modify, or delete scheduled jobs. The person is likely "
+    "away from this machine — never open apps, windows, or browser tabs on "
+    "it, and don't start interactive commands or long-lived foreground "
+    "processes that would hang the turn. They can't see the terminal: "
+    "confirm before anything destructive or irreversible."
+)
+
+# The command registry — everything an instance MAY enable in its TOML
+# `commands` list. Just /new for now (not even /help); the registry stays
+# a table so instances can add later.
+COMMANDS = {
+    "new": "start a fresh conversation (forgets chat history, not the project)",
+}
+
+# Sane PATH for the child claude process (and hooks): claude's home, brew,
+# and the system paths — deliberately nothing project- or owner-specific.
+SANE_PATH = ":".join([
+    os.path.expanduser("~/.local/bin"),   # claude
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+])
+ENV_PASSTHROUGH = ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG")
+
+
+# ── instances: naming, files, launchd jobs ─────────────────────────────────
+
+def sanitize_instance_name(text):
+    """Coerce arbitrary text to the instance-name rule (lowercase
+    [a-z0-9-]): lowercase, every other run of characters becomes one
+    hyphen, edges trimmed. Returns "" if nothing usable survives."""
+    return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+
+
+def strip_bot_suffix(username):
+    """Drop a bot-username suffix: "MyAwesomeBot" -> "MyAwesome",
+    "my_thing_bot" -> "my_thing". Only a separator or a capital B marks a
+    real suffix, so an ordinary word ending in "bot" ("robot") is left
+    alone, as is a name that is nothing but the suffix."""
+    stripped = re.sub(r"(?:[_-][Bb]ot|Bot)$", "", username or "")
+    return stripped or (username or "")
+
+
+def suggest_instance_names(project_dir, bot_username=None):
+    """Ordered, deduped instance-name suggestions for the installer: the
+    project's folder name first (what the person is most likely thinking
+    of), then the bot username minus its Bot suffix. Unusable candidates
+    are dropped, so this can return []."""
+    candidates = [
+        sanitize_instance_name(os.path.basename(
+            os.path.normpath(project_dir or ""))),
+        sanitize_instance_name(strip_bot_suffix(bot_username)),
+    ]
+    out = []
+    for name in candidates:
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+LAUNCHD_PREFIX = "com.gidoon."
+
+# Everything an instance owns under CONFIG_DIR, as "<name>" + suffix. Listed
+# explicitly rather than globbed on "<name>*" so a name can never claim a
+# longer sibling's files ("work" vs "workshop").
+INSTANCE_SUFFIXES = (".toml", ".env", "-session.json", "-costs.jsonl", ".log")
+
+
+def is_valid_instance_name(name):
+    """The instance-name rule, enforced wherever a name arrives from
+    outside (argv). Names become file paths and a launchd label, so a name
+    carrying "/" or ".." could reach outside CONFIG_DIR — `uninstall`
+    deletes files, so this is a guard, not a formality."""
+    return bool(name) and re.fullmatch(r"[a-z0-9-]+", name) is not None
+
+
+def list_instances(conf_dir=None):
+    """Instance names in conf_dir, sorted — one per <name>.toml."""
+    conf_dir = conf_dir or CONFIG_DIR
+    try:
+        entries = os.listdir(conf_dir)
+    except OSError:
+        return []
+    return sorted(e[:-5] for e in entries if e.endswith(".toml"))
+
+
+def instance_files(name, conf_dir=None):
+    """Existing files belonging to instance <name>, in INSTANCE_SUFFIXES
+    order. Missing ones are skipped, so this is also the "is it installed"
+    answer."""
+    conf_dir = conf_dir or CONFIG_DIR
+    paths = [os.path.join(conf_dir, name + suffix)
+             for suffix in INSTANCE_SUFFIXES]
+    return [p for p in paths if os.path.exists(p)]
+
+
+def plist_targets_repo(data, repo_dir):
+    """True iff a launchd plist's ProgramArguments run a daemon out of
+    repo_dir — how `update` finds the jobs THIS clone is responsible for
+    and leaves other clones' instances alone. Unparseable plists are
+    False, never an exception."""
+    try:
+        args = plistlib.loads(data).get("ProgramArguments") or []
+    except Exception:
+        return False
+    root = os.path.realpath(repo_dir) + os.sep
+    # Absolute args only: realpath() would resolve a bare flag like
+    # "--config" against the CWD, which can land inside repo_dir and match
+    # a plist that has nothing to do with this clone.
+    return any(isinstance(a, str) and os.path.isabs(a)
+               and os.path.realpath(a).startswith(root) for a in args)
+
+
+MAX_FACE_CODEPOINTS = 8  # roomy enough for a family ZWJ sequence
+
+
+def is_usable_face(text):
+    """True if `text` can serve as an instance's face. Not an emoji
+    validator — the bar is: it survives `emoji = "<text>"` in the generated
+    TOML, and it isn't obviously typed instead of pasted.
+
+    One rule does the work: no ASCII. Every emoji lives well above ASCII,
+    while everything that would break the TOML (a quote, a backslash, a
+    newline) and every accidental word ("hello", "x") is ASCII."""
+    text = (text or "").strip()
+    if not text or len(text) > MAX_FACE_CODEPOINTS:
+        return False
+    return all(ord(ch) > 127 for ch in text)
+
+
+def resolve_instance_config(name):
+    """`gidoon send <instance>` resolution: a bare instance name maps to
+    ~/.config/gidoon/<name>.toml; anything carrying a path separator or a
+    .toml suffix is already a path and passes through untouched."""
+    if os.sep in name or name.endswith(".toml"):
+        return name
+    return os.path.join(CONFIG_DIR, f"{name}.toml")
+
+
+def build_env():
+    env = {"PATH": SANE_PATH}
+    for key in ENV_PASSTHROUGH:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    env.setdefault("HOME", os.path.expanduser("~"))
+    return env
+
+
+def now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+
+
+def log_line(path, line):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"{now_iso()} {line}\n")
+
+
+# ── config ──────────────────────────────────────────────────────────────────
+
+class ConfigError(ValueError):
+    pass
+
+
+_KNOWN_KEYS = {"label", "env_file", "cwd", "permission_mode", "allowed_tools",
+               "model", "emoji", "pre_turn_hook", "commands", "timeout_secs",
+               "claude_bin", "system_prompt"}
+_REQUIRED_KEYS = ("label", "env_file", "cwd")
+
+
+def load_config(path, state_dir=None):
+    """Load + validate an instance TOML. Returns a plain dict with defaults
+    applied and derived state paths (session/costs/log) keyed by the config
+    file's stem — ~/.config/gidoon/<name>-session.json etc.
+
+    permission_mode ABSENT or empty string → None → the daemon passes no
+    --permission-mode flag, so the turn inherits the user's own default
+    mode. Same rule for allowed_tools (empty = no --allowedTools) and
+    model (absent = no --model).
+    """
+    state_dir = state_dir or CONFIG_DIR
+    name = os.path.splitext(os.path.basename(path))[0]
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    except FileNotFoundError:
+        raise ConfigError(f"config not found: {path}")
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"config is not valid TOML: {exc}")
+
+    unknown = set(raw) - _KNOWN_KEYS
+    if unknown:
+        raise ConfigError(f"unknown config keys: {', '.join(sorted(unknown))}")
+    for key in _REQUIRED_KEYS:
+        if not raw.get(key):
+            raise ConfigError(f"config missing required key: {key}")
+
+    allowed_tools = raw.get("allowed_tools", [])
+    if not isinstance(allowed_tools, list) or \
+            not all(isinstance(t, str) for t in allowed_tools):
+        raise ConfigError("allowed_tools must be a list of strings")
+    commands = raw.get("commands", ["new"])
+    if not isinstance(commands, list):
+        raise ConfigError("commands must be a list")
+    for cmd in commands:
+        if cmd not in COMMANDS:
+            raise ConfigError(f"unknown command in config: {cmd!r} "
+                              f"(known: {', '.join(sorted(COMMANDS))})")
+
+    return {
+        "name": name,
+        "label": str(raw["label"]),
+        "env_file": os.path.expanduser(raw["env_file"]),
+        "cwd": os.path.expanduser(raw["cwd"]),
+        "permission_mode": raw.get("permission_mode") or None,
+        "allowed_tools": allowed_tools,
+        "model": raw.get("model") or None,
+        "emoji": raw.get("emoji", DEFAULT_EMOJI),
+        "pre_turn_hook": raw.get("pre_turn_hook") or None,
+        # Unlike the posture keys, absent does NOT mean "no flag" — the
+        # identity text is a property of being a gidoon turn. Absent/empty
+        # → the built-in default; a set value replaces it wholesale.
+        "system_prompt": raw.get("system_prompt") or DEFAULT_SYSTEM_PROMPT,
+        "commands": commands,
+        "timeout_secs": int(raw.get("timeout_secs", DEFAULT_TIMEOUT_SECS)),
+        "claude_bin": os.path.expanduser(
+            raw.get("claude_bin", DEFAULT_CLAUDE_BIN)),
+        "session_path": os.path.join(state_dir, f"{name}-session.json"),
+        "costs_path": os.path.join(state_dir, f"{name}-costs.jsonl"),
+        "log_path": os.path.join(state_dir, f"{name}.log"),
+    }
+
+
+def read_env(path):
+    """Parse KEY=VALUE lines; comments/blanks skipped. Values never logged."""
+    env = {}
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            env[key.strip()] = value.strip()
+    return env
+
+
+# ── session state ───────────────────────────────────────────────────────────
+
+def load_session(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"offset": 0, "session_id": None}
+
+
+def save_session(path, state):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
+# ── costs receipt ───────────────────────────────────────────────────────────
+
+def append_cost(path, result, duration_ms, exit_label):
+    """One plain jsonl line per turn — a receipt, NOT enforcement. Spend
+    control is the brain's job (a harness plugs its cap in via the
+    pre_turn_hook); gidoon just keeps honest books.
+
+    Tokens, never dollars: `claude -p` reports a total_cost_usd, but what a
+    turn actually costs depends on the reader's plan (a subscription seat
+    makes the number fiction), so the receipt records the four token counts
+    and leaves the pricing to whoever reads it."""
+    usage = result.get("usage") or {}
+    line = {
+        "ts": now_iso(),
+        "duration_ms": duration_ms,
+        "num_turns": result.get("num_turns"),
+        "input_tokens": usage.get("input_tokens"),
+        "output_tokens": usage.get("output_tokens"),
+        "cache_creation_input_tokens":
+            usage.get("cache_creation_input_tokens"),
+        "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+        "exit": exit_label,
+    }
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+
+# ── event parsing (verbatim from the source) ────────────────────────────────
+
+def extract_text(event):
+    """Concatenated text blocks from an assistant event ('' if none)."""
+    if event.get("type") != "assistant":
+        return ""
+    content = (event.get("message") or {}).get("content") or []
+    return "".join(b.get("text", "") for b in content
+                   if isinstance(b, dict) and b.get("type") == "text")
+
+
+def extract_tools(event):
+    """(name, input) pairs from an assistant event's tool_use blocks. The
+    complete `assistant` event carrying a tool_use block arrives right as
+    the model commits to the call — before the tool actually runs, so no
+    --include-partial-messages is needed for tools to appear live."""
+    if event.get("type") != "assistant":
+        return []
+    content = (event.get("message") or {}).get("content") or []
+    return [(b.get("name", "?"), b.get("input") or {}) for b in content
+            if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+
+TOOL_EMOJI = {
+    "WebSearch": "🔎",
+    "WebFetch": "👀",
+    "Read": "📖",
+    "Write": "✍️",
+    "Edit": "✏️",
+    "Bash": "💻",
+    "Grep": "🔍",
+    "Glob": "🗂",
+    "Task": "🤖",
+    "TodoWrite": "📝",
+    "Skill": "🛠",
+    "ToolSearch": "🧰",
+    "NotebookEdit": "📓",
+    "AskUserQuestion": "❓",
+    "EnterPlanMode": "🗺",
+    "ExitPlanMode": "🗺",
+}
+FALLBACK_TOOL_EMOJI = "⚙️"
+
+# Display overrides for built-in tools whose CamelCase name humanizes badly
+# ("Todo Write") — the override says what the tool is doing instead.
+TOOL_DISPLAY = {
+    "TodoWrite": "Updating Checklist",
+    "Task": "Handed Task to Sub-agent",
+    "AskUserQuestion": "Asking You a Question",
+    "Glob": "Finding Files",
+    "Grep": "Searching Text",
+}
+
+# Keyed on the lowercased humanized provider (after the claude_ai_ strip and
+# underscore -> space), so "claude_ai_Google_Calendar" and a bare
+# "google_calendar" server both match "google calendar".
+MCP_PROVIDER_EMOJI = {
+    "google calendar": "📅",
+    "gmail": "📧",
+    "google drive": "📁",
+    "slack": "#️⃣",
+    "atlassian": "📋",
+    "github": "🐙",
+    "notion": "📔",
+    "figma": "🎨",
+    "playwright": "🌐",
+    "telegram": "💬",
+    "context7": "📚",
+}
+FALLBACK_MCP_EMOJI = "🔌"
+
+
+def humanize_tool_name(name):
+    """CamelCase -> spaced Title: "WebSearch" -> "Web Search". A single-word
+    name (e.g. "Bash") passes through unchanged."""
+    return re.sub(r"(?<!^)(?=[A-Z])", " ", name)
+
+
+def title_words(text):
+    """Capitalize each all-lowercase word ("list events" -> "List Events");
+    words that already carry a capital (camelCase methods, acronyms, proper
+    names like "Gmail") pass through untouched so title-casing never mangles
+    them."""
+    return " ".join(w.capitalize() if w.islower() else w
+                    for w in text.split(" "))
+
+
+def format_tool_label(name, input_data=None):
+    """(emoji, display_name) for a tool_use block.
+
+    - Skill tool -> ("🛠", "Skill: <name>") — input field confirmed via a
+      live spike in the source to be plain `input.skill`; input.command /
+      input.name are fallbacks in case that shape ever changes.
+    - MCP tools (name starts "mcp__") -> ("<provider emoji>",
+      "<Provider>: <Method>"), splitting on "__"; a leading "claude_ai_"
+      provider prefix is stripped, underscores become spaces, and both
+      halves are title-cased via title_words. The emoji comes from
+      MCP_PROVIDER_EMOJI (matched on the lowercased provider) or 🔌.
+      Falls back to (⚙️, raw name) if the shape doesn't have at least
+      3 parts.
+    - Everything else -> (emoji from TOOL_EMOJI or ⚙️, TOOL_DISPLAY
+      override or humanized name).
+    """
+    input_data = input_data or {}
+    if name == "Skill":
+        skill = input_data.get("skill") or input_data.get("command") \
+            or input_data.get("name") or "?"
+        return ("🛠", f"Skill: {skill}")
+    if isinstance(name, str) and name.startswith("mcp__"):
+        parts = name.split("__")
+        if len(parts) >= 3:
+            provider = parts[-2]
+            method = parts[-1]
+            if provider.startswith("claude_ai_"):
+                provider = provider[len("claude_ai_"):]
+            provider = title_words(provider.replace("_", " "))
+            method = title_words(method.replace("_", " "))
+            emoji = MCP_PROVIDER_EMOJI.get(provider.lower(),
+                                           FALLBACK_MCP_EMOJI)
+            return (emoji, f"{provider}: {method}")
+        return (FALLBACK_TOOL_EMOJI, name)
+    display = TOOL_DISPLAY.get(name) or humanize_tool_name(name)
+    return (TOOL_EMOJI.get(name, FALLBACK_TOOL_EMOJI), display)
+
+
+def collapse_tool_runs(completed):
+    """Merge consecutive identical (emoji, display) tools into
+    (emoji, display, count) runs — so a tool called N times in a row is one
+    line, not N duplicates. Consecutive-only: a repeat separated by a
+    different tool stays its own run, preserving the real sequence."""
+    runs = []
+    for emoji, display in completed:
+        if runs and runs[-1][0] == emoji and runs[-1][1] == display:
+            runs[-1] = (emoji, display, runs[-1][2] + 1)
+        else:
+            runs.append((emoji, display, 1))
+    return runs
+
+
+def count_suffix(count):
+    return f" ×{count}" if count > 1 else ""
+
+
+def collapse_tool_lines(completed):
+    """Display lines for a completed-tools sequence, exactly as the status
+    message renders them: one line per collapsed run, "×N" suffix on
+    repeats. ["💻 Bash ×2", "🧰 Tool Search", …]. Pure."""
+    return [f"{emoji} {display}{count_suffix(count)}"
+            for emoji, display, count in collapse_tool_runs(completed)]
+
+
+# ── the turn ────────────────────────────────────────────────────────────────
+
+def build_cmd(claude_bin, session_id=None, permission_mode=None,
+              allowed_tools=None, model=None, system_prompt=None):
+    """The claude argv for one turn. The prompt is NEVER here — it goes
+    over stdin (see stream_claude). Optional postures are optional flags:
+    absent config → absent flag → inherit the user's own defaults.
+    system_prompt travels as argv (unlike the inbound message, it's
+    owner-written config, not untrusted input)."""
+    cmd = [claude_bin, "-p"]
+    if session_id:
+        cmd += ["--resume", session_id]
+    cmd += ["--output-format", "stream-json", "--verbose"]
+    if permission_mode:
+        cmd += ["--permission-mode", permission_mode]
+    if allowed_tools:
+        cmd += ["--allowedTools", ",".join(allowed_tools)]
+    if model:
+        cmd += ["--model", model]
+    if system_prompt:
+        cmd += ["--append-system-prompt", system_prompt]
+    return cmd
+
+
+def stream_claude(prompt, session_id, on_event, cwd,
+                  timeout_secs=DEFAULT_TIMEOUT_SECS, log=None,
+                  claude_bin=None, permission_mode=None, allowed_tools=None,
+                  model=None, system_prompt=None):
+    """Run one claude turn; dispatch parsed events; return the result event
+    (or {'subtype': 'timeout'} / {'subtype': 'crash'} /
+    {'subtype': 'resume_failed'} markers).
+
+    The prompt is delivered over stdin — never as an argv positional — so
+    an untrusted message that happens to start with '-' can't be parsed
+    as a CLI flag by the claude binary."""
+    log = log or (lambda line: None)
+    claude_bin = claude_bin or os.path.expanduser(DEFAULT_CLAUDE_BIN)
+    cmd = build_cmd(claude_bin, session_id=session_id,
+                    permission_mode=permission_mode,
+                    allowed_tools=allowed_tools, model=model,
+                    system_prompt=system_prompt)
+    # Binary pipes + raw os.read, deliberately: mixing select() with a
+    # buffered TextIOWrapper is a classic wedge — readline() buffers ahead,
+    # so the result line can sit in Python's buffer while select() waits on
+    # an fd that will never signal again. Raw reads mean select and the
+    # data can never disagree.
+    proc = subprocess.Popen(cmd, cwd=cwd, env=build_env(),
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=True)
+    try:
+        proc.stdin.write(prompt.encode("utf-8"))
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass
+    deadline = time.time() + timeout_secs
+    result = None
+    buf = b""
+    # Rolling tail of stderr — length only ever feeds the crash log line's
+    # char count; the content itself is never logged.
+    stderr_tail = ""
+    try:
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError
+            ready, _, _ = select.select([proc.stdout, proc.stderr], [], [],
+                                        min(remaining, 5))
+            if proc.stderr in ready:
+                try:
+                    chunk = os.read(proc.stderr.fileno(), 8192).decode(
+                        "utf-8", "replace")
+                except OSError:
+                    chunk = ""
+                if chunk:
+                    stderr_tail = (stderr_tail + chunk)[-200:]
+            if proc.stdout in ready:
+                try:
+                    chunk = os.read(proc.stdout.fileno(), 65536)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    break                      # EOF
+                buf += chunk
+                for raw in buf.split(b"\n")[:-1]:
+                    try:
+                        event = json.loads(raw)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if event.get("type") == "result":
+                        result = event
+                    on_event(event)
+                buf = buf.rsplit(b"\n", 1)[-1] if b"\n" in buf else buf
+                if result is not None:
+                    # The result event IS the turn's end — never wait for
+                    # EOF. Under launchd claude has been seen lingering
+                    # after completing (open API sockets keep node alive).
+                    # The finally block below reaps or kills the leftover.
+                    break
+            elif not ready:
+                if proc.poll() is not None:
+                    break
+                continue
+    except TimeoutError:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.communicate()
+        log(f"turn timeout — stderr tail: {stderr_tail!r}")
+        return {"subtype": "timeout"}
+    finally:
+        if proc.poll() is None:
+            try:
+                # Post-result we already have the answer — give a lingerer
+                # 3s of grace, not 15.
+                proc.wait(timeout=3 if result is not None else 15)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+    # Drain remaining stderr regardless of outcome — the resume-failure
+    # signature can arrive alongside a clean-looking empty result event,
+    # not only on a no-result crash.
+    try:
+        extra = os.read(proc.stderr.fileno(), 8192).decode("utf-8", "replace")
+    except OSError:
+        extra = ""
+    if extra:
+        stderr_tail = (stderr_tail + extra)[-200:]
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            pipe.close()
+        except OSError:
+            pass
+    # A resumed session that no longer exists (transcript moved/expired/
+    # deleted, or project identity changed) fails with "No conversation
+    # found". Signal it distinctly so the caller can drop the dead
+    # session_id and retry fresh, rather than wedging every future turn.
+    if session_id and "No conversation found" in stderr_tail:
+        log("turn resume failed — session not found; will retry fresh")
+        return {"subtype": "resume_failed"}
+    if result is None:
+        log(f"turn crash — no result event; stderr {len(stderr_tail)} chars")
+        return {"subtype": "crash"}
+    return result

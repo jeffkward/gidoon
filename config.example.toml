@@ -1,0 +1,66 @@
+# gidoon instance config — copy to ~/.config/gidoon/<name>.toml
+# The file's basename is the instance name: <name>.toml drives
+#   ~/.config/gidoon/<name>-session.json   (offset + claude session id)
+#   ~/.config/gidoon/<name>-costs.jsonl    (per-turn receipt: tokens + timing)
+#   ~/.config/gidoon/<name>.log            (event types/lengths only — never
+#                                           message content, never the token)
+# launchd job: com.gidoon.<name> (rendered by install.sh)
+
+# ── required ────────────────────────────────────────────────────────────────
+
+# Human-readable instance label (shows in logs).
+label = "myproject"
+
+# KEY=VALUE env file holding the secrets (chmod 600, outside git):
+#   GIDOON_BOT_TOKEN=123456:ABC...   (from @BotFather)
+#   GIDOON_CHAT_ID=123456789         (the ONLY chat the daemon answers)
+env_file = "~/.config/gidoon/myproject.env"
+
+# The Claude Code project this mouth speaks for — every turn runs
+# `claude -p` in this directory, so it loads that project's CLAUDE.md,
+# memory, and skills.
+cwd = "~/code/myproject"
+
+# ── optional (all may be omitted) ───────────────────────────────────────────
+
+# Permission posture for the child claude process. ABSENT or "" (the
+# default) passes NO --permission-mode flag, so turns inherit your own
+# default mode — the same feel as your interactive sessions. Set e.g.
+# "bypassPermissions" or "plan" to override per instance.
+#permission_mode = ""
+
+# Tool allowlist (--allowedTools). Empty/absent = no flag passed.
+#allowed_tools = ["WebSearch", "WebFetch", "Read"]
+
+# Model override (--model). Absent = inherit your default.
+#model = ""
+
+# The face this instance wears in the status checklist and replies.
+#emoji = "🗣"
+
+# Command run before EVERY turn; the inbound text arrives on its stdin.
+# Nonzero exit = the turn is DECLINED and the hook's stdout becomes the
+# reply. This is where a harness plugs in spend caps, quiet hours, etc. —
+# gidoon itself enforces nothing (the costs jsonl is a receipt, not a
+# gate). A hook that errors or times out fails OPEN.
+#pre_turn_hook = ""
+
+# Appended to the system prompt of EVERY turn. ABSENT (the default) uses
+# gidoon's built-in text, which tells the turn what's happening — the
+# person is chatting with it over Telegram, it is not an interactive
+# terminal session and not the project's scheduler — so project docs
+# written for interactive sessions can't mislead it. Set this to REPLACE
+# the built-in wholesale (edge case; the default lives in
+# gidoon.DEFAULT_SYSTEM_PROMPT).
+#system_prompt = ""
+
+# Daemon-handled commands to enable (and register in the Telegram "/"
+# menu). The registry: "new" (reset the conversation). /start is always
+# ignored — Telegram sends it on chat clear/reopen.
+commands = ["new"]
+
+# Per-turn wall clock limit in seconds.
+#timeout_secs = 600
+
+# Path to the claude binary.
+#claude_bin = "~/.local/bin/claude"

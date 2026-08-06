@@ -1,0 +1,726 @@
+#!/usr/bin/env python3
+"""gidoon — give a Claude Code project a mouth (Telegram daemon).
+
+One daemon per instance: `gidoon --config ~/.config/gidoon/<name>.toml`.
+Long-polls getUpdates as the SOLE poller on its bot token; each inbound
+message from the allowlisted chat becomes one `claude -p --resume` turn in
+the instance's project directory. The reply UX is TWO distinct messages:
+
+  - STATUS message: sent immediately ("<emoji>💭"), then live-edited as a
+    "face rides the current activity" state machine — each completed tool
+    call settles into a plain static line above, while a single trailing
+    face line always shows what's happening RIGHT NOW (thinking, running a
+    tool, composing, done ✅, or errored ⚠️). Never deleted, never becomes
+    the answer.
+  - ANSWER message: always a fresh message via send_long (4096 split) —
+    this carries the actual reply text and triggers the phone push.
+
+The chat LLM has no Telegram surface — the daemon owns all sends. Runs
+under launchd (com.gidoon.<name>, KeepAlive).
+
+Send an outbound message: `gidoon send <instance> [message]` (message from
+argv or stdin) lets anything on the machine — cron, scripts, other daemons —
+message the owner through the same bot. sendMessage only, never polls.
+
+Privacy: logs record event types, lengths, and counts — never message
+content, never the token.
+
+The turn machinery lives in gidoon.py. Stdlib only.
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+sys.dont_write_bytecode = True  # no __pycache__ litter beside the binaries
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.realpath(os.path.abspath(__file__)))))
+import gidoon as core  # noqa: E402
+
+API_BASE = "https://api.telegram.org"
+EDIT_INTERVAL = 1.2
+TG_MAX = 4096
+ACK_REACTION = "👀"
+HOOK_TIMEOUT_SECS = 30
+LAUNCH_AGENTS = os.path.expanduser("~/Library/LaunchAgents")
+LOCAL_BIN = os.path.expanduser("~/.local/bin")
+REPO_ROOT = os.path.dirname(os.path.dirname(
+    os.path.realpath(os.path.abspath(__file__))))
+
+USAGE = """gidoon — give a Claude Code project a mouth (Telegram)
+
+  gidoon send <instance> [message]   message yourself through an instance's
+                                     bot (message from argv or stdin)
+  gidoon update                      pull the latest gidoon and restart the
+                                     instances running from this clone
+  gidoon uninstall <instance>        remove an instance (or --all); add
+                                     --yes to skip the confirmation
+  gidoon --config <file>             run an instance's daemon in the
+                                     foreground (what launchd runs)
+
+Install an instance with install.sh; instances live in ~/.config/gidoon."""
+
+
+class TgError(Exception):
+    def __init__(self, code, description=""):
+        self.code = code
+        super().__init__(f"telegram api error {code}")
+
+
+class Tg:
+    def __init__(self, token):
+        self._token = token
+
+    def call(self, method, http_timeout=35, **params):
+        # Wrapped end-to-end: any exception that isn't already a TgError
+        # (a stray KeyError/AttributeError on a malformed payload, etc.)
+        # is normalized to TgError("unexpected") rather than propagating
+        # a raw traceback — which could otherwise carry the token-bearing
+        # request URL — and so every `except TgError` guard stays complete.
+        try:
+            url = f"{API_BASE}/bot{self._token}/{method}"
+            data = urllib.parse.urlencode(params).encode()
+            req = urllib.request.Request(url, data=data)
+            try:
+                with urllib.request.urlopen(req, timeout=http_timeout) as resp:
+                    payload = json.load(resp)
+            except urllib.error.HTTPError as exc:
+                try:
+                    payload = json.load(exc)
+                except Exception:
+                    raise TgError(exc.code) from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                raise TgError("network") from exc
+            if not payload.get("ok"):
+                raise TgError(payload.get("error_code", "unknown"))
+            return payload["result"]
+        except TgError:
+            raise
+        except Exception as exc:
+            raise TgError("unexpected") from exc
+
+    def get_updates(self, offset, long=True):
+        # HTTP-level timeout (60s) must exceed Telegram's own long-poll
+        # timeout (50s) or urlopen would time out before Telegram ever
+        # responds. The two "timeout"s live in different namespaces —
+        # http_timeout controls urlopen(); the plain "timeout" kwarg below
+        # flows through **params into the request body as Telegram's own
+        # long-poll parameter. long=False is the immediate (drain) form.
+        if long:
+            return self.call("getUpdates", http_timeout=60, offset=offset,
+                             timeout=50,
+                             allowed_updates=json.dumps(["message"]))
+        return self.call("getUpdates", http_timeout=15, offset=offset,
+                         timeout=0, allowed_updates=json.dumps(["message"]))
+
+    def send(self, chat_id, text):
+        return self.call("sendMessage", chat_id=chat_id, text=text)
+
+    def edit(self, chat_id, message_id, text):
+        return self.call("editMessageText", chat_id=chat_id,
+                         message_id=message_id, text=text)
+
+    def react(self, chat_id, message_id, emoji=ACK_REACTION):
+        return self.call("setMessageReaction", chat_id=chat_id,
+                         message_id=message_id,
+                         reaction=json.dumps([{"type": "emoji",
+                                               "emoji": emoji}]))
+
+    def chat_action(self, chat_id):
+        return self.call("sendChatAction", chat_id=chat_id, action="typing")
+
+    def set_my_commands(self, commands):
+        """Register the command menu with Telegram — typing '/' in the
+        chat then shows the roster natively. commands: [(cmd, desc)]."""
+        payload = [{"command": cmd.lstrip("/"), "description": desc[:256]}
+                   for cmd, desc in commands]
+        return self.call("setMyCommands", commands=json.dumps(payload))
+
+
+def _face_line(face, state, running, running_count=1):
+    """The single trailing line showing what the face is doing RIGHT NOW."""
+    if state == "THINKING":
+        return f"{face}💭"
+    if state == "RUNNING" and running is not None:
+        emoji, display = running
+        return f"{face}{emoji} {display}…{core.count_suffix(running_count)}"
+    if state == "COMPOSING":
+        return f"{face}💬"
+    if state == "DONE":
+        return f"{face} ✅"
+    if state == "ERROR":
+        return f"{face} ⚠️"
+    return f"{face} …"  # GAP/unknown fallback
+
+
+def render_status(face, completed, state, running):
+    """The persistent status-message body: one plain static line per
+    completed tool (consecutive repeats collapsed to "<tool> ×N"), then ONE
+    trailing face line for the current state. When the face is running the
+    same tool that just finished, it ABSORBS that run (shows a combined
+    count on the face line) so there's no near-duplicate stack. If it would
+    exceed TG_MAX, middle-truncate the completed lines — keep the first line
+    and as many recent lines as fit, with a "(N more)" marker between. The
+    face line is always kept in full."""
+    runs = core.collapse_tool_runs(completed)
+    running_count = 1
+    if state == "RUNNING" and running is not None and runs \
+            and runs[-1][0] == running[0] and runs[-1][1] == running[1]:
+        running_count = runs[-1][2] + 1
+        runs = runs[:-1]
+    completed_lines = [f"{emoji} {display}{core.count_suffix(count)}"
+                       for emoji, display, count in runs]
+    face_line = _face_line(face, state, running, running_count)
+    text = "\n".join(completed_lines + [face_line])
+    if len(text) <= TG_MAX:
+        return text
+    if not completed_lines:
+        return face_line[:TG_MAX]
+    first = completed_lines[0]
+    rest = completed_lines[1:]
+    kept = []
+    total = len(first) + len(face_line) + 2  # newline after first, before face
+    for line in reversed(rest):
+        cost = len(line) + 1
+        if total + cost > TG_MAX:
+            break
+        kept.append(line)
+        total += cost
+    kept.reverse()
+    dropped = len(rest) - len(kept)
+    if dropped <= 0:
+        return "\n".join([first] + kept + [face_line])
+    marker = f"… ({dropped} more) …"
+    while kept and total + len(marker) + 1 > TG_MAX:
+        total -= len(kept.pop(0)) + 1
+        dropped += 1
+        marker = f"… ({dropped} more) …"
+    return "\n".join([first, marker] + kept + [face_line])
+
+
+class TurnStatus:
+    """The face-rides-the-current-activity state machine for one turn.
+
+    completed: ordered list of (emoji, display) tuples for finished tool
+    calls. running: the (emoji, display) tuple for the tool currently on
+    the face line, or None. state: THINKING / RUNNING / COMPOSING / DONE
+    / ERROR."""
+
+    def __init__(self, face):
+        self.face = face
+        self.completed = []
+        self.running = None
+        self.state = "THINKING"
+
+    def promote(self):
+        if self.running is not None:
+            self.completed.append(self.running)
+            self.running = None
+
+    def on_assistant(self, event):
+        """Update from a complete `assistant` event. Returns True iff the
+        event actually changed anything worth re-rendering — a
+        thinking-only event (no tool_use, no text) is a no-op."""
+        tools = core.extract_tools(event)
+        if tools:
+            self.promote()
+            labels = [core.format_tool_label(name, inp) for name, inp in tools]
+            self.completed.extend(labels[:-1])
+            self.running = labels[-1]
+            self.state = "RUNNING"
+            return True
+        if core.extract_text(event):
+            self.promote()
+            self.state = "COMPOSING"
+            return True
+        return False
+
+    def on_result(self, is_error=False):
+        self.promote()
+        self.state = "ERROR" if is_error else "DONE"
+
+    def on_error(self):
+        self.promote()
+        self.state = "ERROR"
+
+    def render(self):
+        return render_status(self.face, self.completed, self.state,
+                             self.running)
+
+
+def send_long(tg, chat_id, text):
+    text = text or "(empty reply)"
+    for i in range(0, len(text), TG_MAX):
+        tg.send(chat_id, text[i:i + TG_MAX])
+
+
+class Daemon:
+    """One gidoon instance: config + allowlisted chat + session state."""
+
+    def __init__(self, tg, cfg, chat_id):
+        self.tg = tg
+        self.cfg = cfg
+        self.chat_id = chat_id
+        self.face = cfg["emoji"]
+        self.state = core.load_session(cfg["session_path"])
+
+    def log(self, line):
+        core.log_line(self.cfg["log_path"], line)
+
+    def save_state(self):
+        core.save_session(self.cfg["session_path"], self.state)
+
+    # ── pre-turn hook ───────────────────────────────────────────────────
+
+    def pre_turn_decline(self, text):
+        """Run the configured pre_turn_hook (the inbound text on its
+        stdin). Nonzero exit → the turn is DECLINED and the hook's stdout
+        becomes the reply. This is where a harness (a brain) plugs in
+        spend caps etc. — gidoon itself enforces nothing. A hook that
+        errors or times out FAILS OPEN (the turn runs) so a wedged hook
+        can't silence the mouth."""
+        hook = self.cfg.get("pre_turn_hook")
+        if not hook:
+            return None
+        try:
+            proc = subprocess.run(hook, shell=True, input=text,
+                                  capture_output=True, text=True,
+                                  timeout=HOOK_TIMEOUT_SECS,
+                                  env=core.build_env())
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            self.log(f"pre_turn_hook failed open ({type(exc).__name__})")
+            return None
+        if proc.returncode in (126, 127):
+            # Shell-level "not found" / "not executable" — a misconfigured
+            # hook, not a decline. Fail open so a broken hook can't mute
+            # the mouth on every turn.
+            self.log(f"pre_turn_hook failed open (exit {proc.returncode} — "
+                     f"hook missing/not executable)")
+            return None
+        if proc.returncode != 0:
+            self.log(f"pre_turn_hook declined turn (exit {proc.returncode})")
+            return (proc.stdout or "").strip() or \
+                f"Not right now — a pre-turn check declined that {self.face}"
+        return None
+
+    # ── message handling ────────────────────────────────────────────────
+
+    def handle_message(self, msg):
+        """One inbound message → one claude turn → two Telegram messages: a
+        persistent STATUS message (tool activity log, edited in place,
+        never deleted) and a fresh ANSWER message via send_long."""
+        tg, cfg, chat_id = self.tg, self.cfg, self.chat_id
+        text = msg.get("text")
+        if text is None:
+            kind = "voice" if "voice" in msg \
+                else ("photo" if "photo" in msg else "non-text")
+            self.log(f"non-text inbound ({kind}) — declined")
+            tg.send(chat_id, f"Text only for now {self.face}")
+            return
+
+        # /start is what Telegram sends when the chat is cleared/reopened —
+        # not a real command; ignore it entirely.
+        if text.strip() == "/start":
+            self.log("ignored /start")
+            return
+
+        if text.strip() == "/new" and "new" in cfg["commands"]:
+            self.state["session_id"] = None
+            self.save_state()
+            self.log("session reset via /new")
+            tg.send(chat_id, f"Fresh conversation {self.face}")
+            return
+
+        # Cheap ack so the phone shows life within seconds, even before
+        # the status message lands. Cosmetic — never let it block a turn.
+        try:
+            tg.react(chat_id, msg["message_id"])
+        except (TgError, KeyError):
+            pass
+
+        declined = self.pre_turn_decline(text)
+        if declined is not None:
+            send_long(tg, chat_id, declined)
+            return
+
+        try:
+            tg.chat_action(chat_id)
+        except TgError:
+            pass
+        turn = TurnStatus(self.face)
+        initial_text = turn.render()  # "<face>💭"
+        status = tg.send(chat_id, initial_text)
+        status_id = status["message_id"]
+        draft = {"last_edit": 0.0, "last_sent": initial_text}
+
+        def flush_status(shown):
+            """Edit the status message iff it actually changed — a no-op
+            editMessageText errors as "message is not modified" on the real
+            API, which would otherwise trip our own TgError swallow for no
+            reason. Called directly (bypassing the EDIT_INTERVAL throttle
+            below) for the final DONE/ERROR render, so that one always goes
+            out regardless of when the last intermediate edit landed."""
+            if shown == draft["last_sent"]:
+                return
+            try:
+                tg.edit(chat_id, status_id, shown)
+                draft["last_sent"] = shown
+            except TgError:
+                pass  # edit races/rate limits are cosmetic; the answer send is what matters
+
+        def on_event(event):
+            if event.get("type") != "assistant" or not turn.on_assistant(event):
+                return
+            now = time.time()
+            if now - draft["last_edit"] < EDIT_INTERVAL:
+                return
+            flush_status(turn.render())
+            draft["last_edit"] = now
+
+        started = time.time()
+        self.log(f"turn start ({len(text)} chars in)")
+        result = core.stream_claude(
+            text, self.state.get("session_id"), on_event,
+            cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"], log=self.log,
+            claude_bin=cfg["claude_bin"],
+            permission_mode=cfg["permission_mode"],
+            allowed_tools=cfg["allowed_tools"], model=cfg["model"],
+            system_prompt=cfg["system_prompt"])
+        # Self-heal: if the stored session can't be resumed, forget it and
+        # retry once from a fresh session so the turn still succeeds.
+        if result.get("subtype") == "resume_failed":
+            self.state["session_id"] = None
+            self.save_state()
+            result = core.stream_claude(
+                text, None, on_event,
+                cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"],
+                log=self.log, claude_bin=cfg["claude_bin"],
+                permission_mode=cfg["permission_mode"],
+                allowed_tools=cfg["allowed_tools"], model=cfg["model"],
+                system_prompt=cfg["system_prompt"])
+        duration_ms = int((time.time() - started) * 1000)
+
+        subtype = result.get("subtype")
+        if subtype == "timeout":
+            turn.on_error()
+            flush_status(turn.render())
+            core.append_cost(cfg["costs_path"], {}, duration_ms, "timeout")
+            mins = max(1, cfg["timeout_secs"] // 60)
+            tg.send(chat_id, f"That one hit my {mins}-minute limit and I "
+                             f"stopped {self.face} — try again or /new.")
+            return
+        if subtype == "crash":
+            turn.on_error()
+            flush_status(turn.render())
+            core.append_cost(cfg["costs_path"], {}, duration_ms, "crash")
+            tg.send(chat_id, f"Something went wrong on my side {self.face} — "
+                             f"try again in a moment.")
+            return
+
+        if result.get("session_id"):
+            self.state["session_id"] = result["session_id"]
+            self.save_state()
+        core.append_cost(cfg["costs_path"], result, duration_ms,
+                         0 if not result.get("is_error") else 1)
+
+        turn.on_result(is_error=bool(result.get("is_error")))
+        flush_status(turn.render())
+
+        final_text = result.get("result") or ""
+        send_long(tg, chat_id, final_text)
+        self.log(f"turn done ({duration_ms}ms, {len(final_text)} chars out)")
+
+    # ── the poll loop ───────────────────────────────────────────────────
+
+    def drain_backlog(self):
+        """On a brand-new instance (no session file yet), skip any pending
+        updates instead of replaying them as turns — a fresh mouth starts
+        listening from NOW. Matters most when the token is inherited from
+        a previous poller (e.g. a retired plugin) with stale updates
+        queued."""
+        if os.path.exists(self.cfg["session_path"]):
+            return
+        try:
+            updates = self.tg.get_updates(0, long=False)
+        except TgError as exc:
+            self.log(f"backlog drain failed ({exc.code}) — continuing")
+            return
+        if updates:
+            self.state["offset"] = updates[-1]["update_id"] + 1
+            self.log(f"fresh start: skipped {len(updates)} pending updates")
+        self.save_state()
+
+    def run(self):
+        self.log(f"daemon start (instance {self.cfg['name']})")
+        # Register the command menu with Telegram (typing '/' shows the
+        # roster). Best-effort: a hiccup here must never stop the daemon.
+        menu = [(f"/{name}", core.COMMANDS[name])
+                for name in self.cfg["commands"]]
+        if menu:
+            try:
+                self.tg.set_my_commands(menu)
+                self.log(f"command menu registered ({len(menu)} commands)")
+            except TgError as exc:
+                self.log(f"command menu registration failed ({exc.code}) "
+                         f"— continuing")
+        self.drain_backlog()
+        backoff = 1
+        while True:
+            try:
+                updates = self.tg.get_updates(self.state["offset"])
+                backoff = 1
+            except TgError as exc:
+                self.log(f"poll error ({exc.code}) — backoff {backoff}s")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+                continue
+            for update in updates:
+                self.handle_update(update)
+
+    def handle_update(self, update):
+        """Allowlist filter + poison-message guard around one update. The
+        offset advances no matter what, so one bad message can never wedge
+        the loop."""
+        msg = update.get("message")
+        if msg:
+            if msg.get("chat", {}).get("id") != self.chat_id:
+                self.log("ignored message from non-allowlisted chat")
+            else:
+                try:
+                    self.handle_message(msg)
+                except Exception as exc:  # poison-message guard
+                    self.log(f"handler error: {type(exc).__name__}")
+                    try:
+                        self.tg.send(self.chat_id,
+                                     f"I tripped on that one {self.face} — "
+                                     f"logged it; try again.")
+                    except Exception:
+                        pass
+        self.state["offset"] = update["update_id"] + 1
+        self.save_state()
+
+
+def _load_instance(config_path, prog="gidoon"):
+    """Shared config + credentials loading for the daemon and `send`.
+    Returns (cfg, token, chat_id); any problem is a clean sys.exit."""
+    try:
+        cfg = core.load_config(config_path)
+    except core.ConfigError as exc:
+        sys.exit(f"{prog}: {exc}")
+    try:
+        env = core.read_env(cfg["env_file"])
+    except OSError as exc:
+        sys.exit(f"{prog}: cannot read env file {cfg['env_file']}: {exc}")
+    token = env.get("GIDOON_BOT_TOKEN")
+    chat_id = env.get("GIDOON_CHAT_ID")
+    if not token or not chat_id:
+        sys.exit(f"{prog}: {cfg['env_file']} missing GIDOON_BOT_TOKEN "
+                 f"or GIDOON_CHAT_ID")
+    try:
+        chat_id = int(chat_id)
+    except ValueError:
+        sys.exit(f"{prog}: GIDOON_CHAT_ID must be an integer")
+    return cfg, token, chat_id
+
+
+def send_main(argv):
+    """`gidoon send <instance> [message]` — outbound sendMessage through an
+    instance's bot, usable by anything on the machine (cron, scripts, other
+    daemons). One-way bell: it only ever calls sendMessage, NEVER getUpdates,
+    so it cannot collide with the running daemon's poller (the one-poller-
+    per-token law only binds polling)."""
+    parser = argparse.ArgumentParser(
+        prog="gidoon send",
+        description="send a message through an instance's bot")
+    parser.add_argument("instance",
+                        help="instance name (~/.config/gidoon/<name>.toml) "
+                             "or a path to an instance TOML")
+    parser.add_argument("message", nargs="?",
+                        help="text to send; omitted → read from stdin")
+    args = parser.parse_args(argv)
+    _, token, chat_id = _load_instance(
+        core.resolve_instance_config(args.instance), prog="gidoon send")
+    text = args.message if args.message is not None else sys.stdin.read()
+    text = text.rstrip("\n")
+    if not text.strip():
+        sys.exit("gidoon send: empty message")
+    try:
+        send_long(Tg(token), chat_id, text)
+    except TgError as exc:
+        sys.exit(f"gidoon send: telegram error ({exc.code})")
+
+
+def _launchctl(*args):
+    """launchctl, quietly — returns the exit code. Wrapped so the
+    management commands can be tested without touching the real machine."""
+    return subprocess.run(["launchctl", *args],
+                          capture_output=True, text=True).returncode
+
+
+def _git(*args):
+    return subprocess.run(["git", "-C", REPO_ROOT, *args]).returncode
+
+
+def _gui_domain():
+    return f"gui/{os.getuid()}"
+
+
+def _plist_path(name):
+    return os.path.join(LAUNCH_AGENTS, f"{core.LAUNCHD_PREFIX}{name}.plist")
+
+
+def _confirm(prompt):
+    """y/N on stdin. Anything but yes means no, and a closed stdin (piped,
+    cron) also means no — destructive work needs an explicit --yes."""
+    try:
+        print(prompt, end="", flush=True)
+        return sys.stdin.readline().strip().lower() in ("y", "yes")
+    except (EOFError, OSError):
+        return False
+
+
+def _remove_command_symlink():
+    """Drop the `gidoon` command symlink once the last instance is gone —
+    but only if it's a symlink INTO this clone. Someone else's file (or
+    another clone's link) of the same name is never touched."""
+    link = os.path.join(LOCAL_BIN, "gidoon")
+    if not os.path.islink(link):
+        return
+    target = os.path.realpath(link)
+    if target.startswith(os.path.realpath(REPO_ROOT) + os.sep):
+        try:
+            os.remove(link)
+            print(f"Removed the gidoon command ({link})")
+        except OSError as exc:
+            print(f"  could not remove {link}: {exc}", file=sys.stderr)
+
+
+def uninstall_main(argv):
+    """`gidoon uninstall <instance> | --all [--yes]` — stop the launchd job
+    and delete the instance's files. Never touches this clone of the repo
+    (say so at the end, so "uninstalled" isn't misread as "gone")."""
+    parser = argparse.ArgumentParser(
+        prog="gidoon uninstall", description="remove a gidoon instance")
+    parser.add_argument("instance", nargs="?", help="instance name")
+    parser.add_argument("--all", action="store_true",
+                        help="remove every installed instance")
+    parser.add_argument("--yes", action="store_true",
+                        help="skip the confirmation prompt")
+    args = parser.parse_args(argv)
+
+    if args.all:
+        names = core.list_instances()
+        if not names:
+            sys.exit(f"gidoon uninstall: no instances in {core.CONFIG_DIR}")
+    elif args.instance:
+        # Validate BEFORE the name is turned into paths to delete.
+        if not core.is_valid_instance_name(args.instance):
+            sys.exit(f"gidoon uninstall: '{args.instance}' isn't a valid "
+                     f"instance name (lowercase letters, digits, hyphens)")
+        names = [args.instance]
+        if not core.instance_files(args.instance) \
+                and not os.path.exists(_plist_path(args.instance)):
+            sys.exit(f"gidoon uninstall: no instance '{args.instance}' "
+                     f"in {core.CONFIG_DIR}")
+    else:
+        sys.exit("gidoon uninstall: name an instance, or pass --all")
+
+    doomed = []
+    for name in names:
+        doomed.extend(core.instance_files(name))
+        plist = _plist_path(name)
+        if os.path.exists(plist):
+            doomed.append(plist)
+
+    if not args.yes:
+        print("This will stop and delete:")
+        for name in names:
+            print(f"  {core.LAUNCHD_PREFIX}{name} (launchd job)")
+        for path in doomed:
+            print(f"  {path}")
+        if not _confirm("Remove them? [y/N] "):
+            print("Nothing removed.")
+            return
+
+    for name in names:
+        _launchctl("bootout", f"{_gui_domain()}/{core.LAUNCHD_PREFIX}{name}")
+    for path in doomed:
+        try:
+            os.remove(path)
+        except OSError as exc:
+            print(f"  could not remove {path}: {exc}", file=sys.stderr)
+    print(f"Removed: {', '.join(names)}")
+    if not core.list_instances():
+        _remove_command_symlink()
+    print(f"(this clone of gidoon is untouched: {REPO_ROOT})")
+
+
+def update_main(argv):
+    """`gidoon update` — pull this clone, then restart the instances whose
+    launchd job runs from it. Instances served by another clone are left
+    alone; a failed pull restarts nothing."""
+    argparse.ArgumentParser(
+        prog="gidoon update",
+        description="pull the latest gidoon and restart its instances"
+    ).parse_args(argv)
+
+    print(f"Updating {REPO_ROOT}…")
+    if _git("pull", "--ff-only") != 0:
+        sys.exit("gidoon update: git pull failed (uncommitted changes?)")
+
+    restarted = []
+    for name in core.list_instances():
+        plist = _plist_path(name)
+        try:
+            with open(plist, "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        if not core.plist_targets_repo(data, REPO_ROOT):
+            continue
+        label = f"{core.LAUNCHD_PREFIX}{name}"
+        _launchctl("kickstart", "-k", f"{_gui_domain()}/{label}")
+        restarted.append(name)
+
+    if restarted:
+        print(f"Restarted: {', '.join(restarted)}")
+    else:
+        print("No instances run from this clone — nothing to restart.")
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    command = argv[0] if argv else None
+    if command in (None, "-h", "--help", "help"):
+        print(USAGE)
+        sys.exit(0 if command else 1)
+    if command == "send":
+        return send_main(argv[1:])
+    if command == "uninstall":
+        return uninstall_main(argv[1:])
+    if command == "update":
+        return update_main(argv[1:])
+    if not command.startswith("-"):
+        print(USAGE)
+        print(f"gidoon: unknown command '{command}'", file=sys.stderr)
+        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        prog="gidoon", description="give a Claude Code project a mouth")
+    parser.add_argument("--config", required=True,
+                        help="instance TOML (~/.config/gidoon/<name>.toml)")
+    args = parser.parse_args(argv)
+
+    cfg, token, chat_id = _load_instance(args.config)
+    if not os.path.isdir(cfg["cwd"]):
+        sys.exit(f"gidoon: project cwd missing: {cfg['cwd']}")
+
+    Daemon(Tg(token), cfg, chat_id).run()
+
+
+if __name__ == "__main__":
+    main()
