@@ -18,8 +18,11 @@ The hard-won laws, learned live before this repo was born:
     retry fresh, rather than wedging every future turn. The signature can
     arrive alongside a clean-looking empty result event, not only on a
     no-result crash.
-  - collapse_tool_runs / count_suffix / collapse_tool_lines are pure and
-    ported verbatim — they define the status-message checklist rendering.
+Rendering is NOT here. The tool-checklist layer (format_tool_label,
+collapse_tool_runs, extract_text, …) lives in gidoon_render.py, which is
+pure and meant to be vendored by a host project that renders the same turn
+on its own surface. Every name is re-exported below, so `import gidoon as
+core` sees no difference.
 
 Stdlib only. Python >= 3.11 (tomllib).
 """
@@ -356,155 +359,25 @@ def append_usage(path, result, duration_ms, exit_label):
         f.write(json.dumps(line, ensure_ascii=False) + "\n")
 
 
-# ── event parsing (verbatim from the source) ────────────────────────────────
-
-def extract_text(event):
-    """Concatenated text blocks from an assistant event ('' if none)."""
-    if event.get("type") != "assistant":
-        return ""
-    content = (event.get("message") or {}).get("content") or []
-    return "".join(b.get("text", "") for b in content
-                   if isinstance(b, dict) and b.get("type") == "text")
-
-
-def extract_tools(event):
-    """(name, input) pairs from an assistant event's tool_use blocks. The
-    complete `assistant` event carrying a tool_use block arrives right as
-    the model commits to the call — before the tool actually runs, so no
-    --include-partial-messages is needed for tools to appear live."""
-    if event.get("type") != "assistant":
-        return []
-    content = (event.get("message") or {}).get("content") or []
-    return [(b.get("name", "?"), b.get("input") or {}) for b in content
-            if isinstance(b, dict) and b.get("type") == "tool_use"]
-
-
-TOOL_EMOJI = {
-    "WebSearch": "🔎",
-    "WebFetch": "👀",
-    "Read": "📖",
-    "Write": "✍️",
-    "Edit": "✏️",
-    "Bash": "💻",
-    "Grep": "🔍",
-    "Glob": "🗂",
-    "Task": "🤖",
-    "TodoWrite": "📝",
-    "Skill": "🛠",
-    "ToolSearch": "🧰",
-    "NotebookEdit": "📓",
-    "AskUserQuestion": "❓",
-    "EnterPlanMode": "🗺",
-    "ExitPlanMode": "🗺",
-}
-FALLBACK_TOOL_EMOJI = "⚙️"
-
-# Display overrides for built-in tools whose CamelCase name humanizes badly
-# ("Todo Write") — the override says what the tool is doing instead.
-TOOL_DISPLAY = {
-    "TodoWrite": "Updating Checklist",
-    "Task": "Handed Task to Sub-agent",
-    "AskUserQuestion": "Asking You a Question",
-    "Glob": "Finding Files",
-    "Grep": "Searching Text",
-}
-
-# Keyed on the lowercased humanized provider (after the claude_ai_ strip and
-# underscore -> space), so "claude_ai_Google_Calendar" and a bare
-# "google_calendar" server both match "google calendar".
-MCP_PROVIDER_EMOJI = {
-    "google calendar": "📅",
-    "gmail": "📧",
-    "google drive": "📁",
-    "slack": "#️⃣",
-    "atlassian": "📋",
-    "github": "🐙",
-    "notion": "📔",
-    "figma": "🎨",
-    "playwright": "🌐",
-    "telegram": "💬",
-    "context7": "📚",
-}
-FALLBACK_MCP_EMOJI = "🔌"
-
-
-def humanize_tool_name(name):
-    """CamelCase -> spaced Title: "WebSearch" -> "Web Search". A single-word
-    name (e.g. "Bash") passes through unchanged."""
-    return re.sub(r"(?<!^)(?=[A-Z])", " ", name)
-
-
-def title_words(text):
-    """Capitalize each all-lowercase word ("list events" -> "List Events");
-    words that already carry a capital (camelCase methods, acronyms, proper
-    names like "Gmail") pass through untouched so title-casing never mangles
-    them."""
-    return " ".join(w.capitalize() if w.islower() else w
-                    for w in text.split(" "))
-
-
-def format_tool_label(name, input_data=None):
-    """(emoji, display_name) for a tool_use block.
-
-    - Skill tool -> ("🛠", "Skill: <name>") — input field confirmed via a
-      live spike in the source to be plain `input.skill`; input.command /
-      input.name are fallbacks in case that shape ever changes.
-    - MCP tools (name starts "mcp__") -> ("<provider emoji>",
-      "<Provider>: <Method>"), splitting on "__"; a leading "claude_ai_"
-      provider prefix is stripped, underscores become spaces, and both
-      halves are title-cased via title_words. The emoji comes from
-      MCP_PROVIDER_EMOJI (matched on the lowercased provider) or 🔌.
-      Falls back to (⚙️, raw name) if the shape doesn't have at least
-      3 parts.
-    - Everything else -> (emoji from TOOL_EMOJI or ⚙️, TOOL_DISPLAY
-      override or humanized name).
-    """
-    input_data = input_data or {}
-    if name == "Skill":
-        skill = input_data.get("skill") or input_data.get("command") \
-            or input_data.get("name") or "?"
-        return ("🛠", f"Skill: {skill}")
-    if isinstance(name, str) and name.startswith("mcp__"):
-        parts = name.split("__")
-        if len(parts) >= 3:
-            provider = parts[-2]
-            method = parts[-1]
-            if provider.startswith("claude_ai_"):
-                provider = provider[len("claude_ai_"):]
-            provider = title_words(provider.replace("_", " "))
-            method = title_words(method.replace("_", " "))
-            emoji = MCP_PROVIDER_EMOJI.get(provider.lower(),
-                                           FALLBACK_MCP_EMOJI)
-            return (emoji, f"{provider}: {method}")
-        return (FALLBACK_TOOL_EMOJI, name)
-    display = TOOL_DISPLAY.get(name) or humanize_tool_name(name)
-    return (TOOL_EMOJI.get(name, FALLBACK_TOOL_EMOJI), display)
-
-
-def collapse_tool_runs(completed):
-    """Merge consecutive identical (emoji, display) tools into
-    (emoji, display, count) runs — so a tool called N times in a row is one
-    line, not N duplicates. Consecutive-only: a repeat separated by a
-    different tool stays its own run, preserving the real sequence."""
-    runs = []
-    for emoji, display in completed:
-        if runs and runs[-1][0] == emoji and runs[-1][1] == display:
-            runs[-1] = (emoji, display, runs[-1][2] + 1)
-        else:
-            runs.append((emoji, display, 1))
-    return runs
-
-
-def count_suffix(count):
-    return f" ×{count}" if count > 1 else ""
-
-
-def collapse_tool_lines(completed):
-    """Display lines for a completed-tools sequence, exactly as the status
-    message renders them: one line per collapsed run, "×N" suffix on
-    repeats. ["💻 Bash ×2", "🧰 Tool Search", …]. Pure."""
-    return [f"{emoji} {display}{count_suffix(count)}"
-            for emoji, display, count in collapse_tool_runs(completed)]
+# ── rendering (vendorable) ──────────────────────────────────────────────
+# Lives in gidoon_render.py so a host project can vendor that file whole
+# and render from the same source. Re-exported here so `import gidoon as
+# core` is unaffected — same objects, never copies.
+from gidoon_render import (  # noqa: F401  (re-exported)
+    TOOL_EMOJI,
+    FALLBACK_TOOL_EMOJI,
+    TOOL_DISPLAY,
+    MCP_PROVIDER_EMOJI,
+    FALLBACK_MCP_EMOJI,
+    humanize_tool_name,
+    title_words,
+    format_tool_label,
+    collapse_tool_runs,
+    count_suffix,
+    collapse_tool_lines,
+    extract_text,
+    extract_tools,
+)
 
 
 # ── the turn ────────────────────────────────────────────────────────────────
