@@ -49,7 +49,7 @@ cwd = "~/code/myproject"
 # model. The message's remaining text arrives on the hook's stdin AND as
 # $1; the hook's stdout becomes the reply (print nothing for a deliberately
 # silent command). Names are registered in Telegram's "/" menu and listed
-# by /help. /new, /help and /start are built in and cannot be overridden.
+# by /help. /clear, /help and /start are built in and cannot be overridden.
 #
 # `timeout` is per hook and matters: the default (30s) suits reading a
 # number off disk, and would SIGKILL anything that runs a model. Give a
@@ -98,9 +98,17 @@ cwd = "~/code/myproject"
 #system_prompt = ""
 
 # Daemon-handled commands to enable (and register in the Telegram "/"
-# menu). The registry: "new" (reset the conversation). /start is always
-# ignored — Telegram sends it on chat clear/reopen.
-commands = ["new"]
+# menu). The registry: "clear" (forget the conversation context) and "help"
+# (list every command, built-in and hook). Absent = both.
+#
+# "new" is still accepted here and still typeable — it was the old name for
+# "clear" — but only "clear" is published in the menu.
+#
+# /start is never published: Telegram sends it on a brand-new chat, or one
+# that was deleted and reopened. Either way the transcript on the owner's
+# side is gone, so the daemon clears context to match and says so. That
+# happens whatever this list says — it is a state signal, not a command.
+#commands = ["clear", "help"]
 
 # Per-turn wall clock limit in seconds.
 #timeout_secs = 600

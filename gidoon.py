@@ -71,11 +71,20 @@ DEFAULT_HOOK_TIMEOUT_SECS = 30
 # The command registry — everything an instance MAY enable in its TOML
 # `commands` list. Both are rendered from config alone, so neither needs a
 # line of host code: /help lists this table plus the instance's own hooks.
+#
+# "your messages stay" is load-bearing, not filler. Telegram's own "Clear
+# Chat" DELETES messages, and it sits in the same menu — without that
+# clause the two read as the same action.
 COMMANDS = {
-    "new": "start a fresh conversation (forgets chat history, not the project)",
+    "clear": "clear the conversation context (your messages stay)",
     "help": "list the commands this bot understands",
 }
-DEFAULT_COMMANDS = ["new", "help"]
+DEFAULT_COMMANDS = ["clear", "help"]
+
+# Older names, still accepted in a config's `commands` list and still
+# typeable, but not published in the '/' menu. Renaming a command must not
+# turn a working instance into a startup error.
+COMMAND_ALIASES = {"new": "clear"}
 
 # Sane PATH for the child claude process (and hooks): claude's home, brew,
 # and the system paths — deliberately nothing project- or owner-specific.
@@ -323,8 +332,10 @@ HOOK_NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 
 # Names the daemon answers itself, before dispatch. A hook of one of these
 # names would be dead config that looks live, so it is dropped rather than
-# silently ignored at runtime.
-RESERVED_COMMANDS = frozenset(COMMANDS) | {"start"}
+# silently ignored at runtime. ALIASES COUNT: they are still typeable, so a
+# hook named for one would never be reached.
+RESERVED_COMMANDS = frozenset(COMMANDS) | frozenset(COMMAND_ALIASES) \
+    | {"start"}
 
 
 def _load_command_hooks(raw_hooks):
@@ -397,6 +408,9 @@ def load_config(path, state_dir=None):
     commands = raw.get("commands", list(DEFAULT_COMMANDS))
     if not isinstance(commands, list):
         raise ConfigError("commands must be a list")
+    # Aliases normalize to their canonical name, so a config written against
+    # an older release keeps working and the daemon only ever sees one name.
+    commands = [COMMAND_ALIASES.get(c, c) for c in commands]
     for cmd in commands:
         if cmd not in COMMANDS:
             raise ConfigError(f"unknown command in config: {cmd!r} "

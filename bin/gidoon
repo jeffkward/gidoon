@@ -301,6 +301,39 @@ class Daemon:
             self.log(f"command menu registration failed ({exc.code}) "
                      f"— continuing")
 
+    def reset_context(self, source):
+        """Forget the conversation and say so. `source` is "clear" (the
+        owner typed it) or "start" (Telegram's handshake).
+
+        Only the REPLY differs, because only the situation does. Each of the
+        four states says what is true of it and nothing more — a message
+        that claims to have cleared something it didn't is exactly the
+        confusion this command exists to remove.
+
+        First contact is detectable without extra state: the offset is only
+        ever 0 before the first update is acknowledged, and handle_update
+        advances it AFTER this returns. (A token inherited with a backlog
+        already queued reads as "already fresh" instead — a slightly cooler
+        greeting on an unusual install, not worth persisting a flag for.)"""
+        had_session = bool(self.state.get("session_id"))
+        first_contact = self.state.get("offset", 0) == 0 and not had_session
+        self.state["session_id"] = None
+        self.save_state()
+
+        if source == "clear":
+            reply = "Fresh conversation. What's up?"
+        elif first_contact:
+            reply = "Hello! I'm here and listening. What's up?"
+        elif had_session:
+            reply = ("Fresh Telegram chat. Context cleared on this end. "
+                     "What's up?")
+        else:
+            reply = "Fresh Telegram chat. What's up?"
+
+        self.log(f"context reset via /{source} "
+                 f"(had_session={had_session}, first={first_contact})")
+        self.tg.send(self.chat_id, f"{self.face} {reply}")
+
     def send_help(self):
         """The command list, rendered from config alone — the registry and
         the instance's hook descriptions are both already here, so there is
@@ -331,18 +364,18 @@ class Daemon:
         except subprocess.TimeoutExpired:
             self.log(f"/{name} hook timed out after {spec['timeout']}s")
             self.tg.send(self.chat_id,
-                         f"/{name} didn't finish in time {self.face}")
+                         f"{self.face} /{name} didn't finish in time")
             return
         except OSError as exc:
             self.log(f"/{name} hook failed ({type(exc).__name__})")
-            self.tg.send(self.chat_id, f"/{name} couldn't run {self.face}")
+            self.tg.send(self.chat_id, f"{self.face} /{name} couldn't run")
             return
         out = (proc.stdout or "").strip()
         if proc.returncode != 0:
             self.log(f"/{name} hook exit {proc.returncode}")
             if not out:
                 self.tg.send(self.chat_id,
-                             f"/{name} failed {self.face} — nothing to show.")
+                             f"{self.face} /{name} failed — nothing to show.")
                 return
         if out:
             send_long(self.tg, self.chat_id, out)
@@ -426,7 +459,7 @@ class Daemon:
         if proc.returncode != 0:
             self.log(f"pre_turn_hook declined turn (exit {proc.returncode})")
             return (proc.stdout or "").strip() or \
-                f"Not right now — a pre-turn check declined that {self.face}"
+                f"{self.face} Not right now — a pre-turn check declined that"
         return None
 
     # ── message handling ────────────────────────────────────────────────
@@ -441,20 +474,32 @@ class Daemon:
             kind = "voice" if "voice" in msg \
                 else ("photo" if "photo" in msg else "non-text")
             self.log(f"non-text inbound ({kind}) — declined")
-            tg.send(chat_id, f"Text only for now {self.face}")
+            tg.send(chat_id, f"{self.face} Text only for now")
             return
 
-        # /start is what Telegram sends when the chat is cleared/reopened —
-        # not a real command; ignore it entirely.
-        if text.strip() == "/start":
-            self.log("ignored /start")
+        # /start is Telegram's, not the owner's: it arrives on a brand-new
+        # chat, or on one that was deleted and reopened. Either way the
+        # transcript on their side is gone, so resuming one they can no
+        # longer see is the wrong default. Deliberately NOT gated on the
+        # command list — this is a state signal, not a command they chose
+        # to have, and matching their side is the safe direction.
+        stripped = text.strip()
+        first_word = stripped.split(None, 1)[0].lower() if stripped else ""
+
+        # First WORD for /start, because a t.me/<bot>?start=xyz deep link
+        # arrives as "/start xyz" — still the handshake, still means the
+        # transcript is gone.
+        if first_word == "/start":
+            self.reset_context("start")
             return
 
-        if text.strip() == "/new" and "new" in cfg["commands"]:
-            self.state["session_id"] = None
-            self.save_state()
-            self.log("session reset via /new")
-            tg.send(chat_id, f"Fresh conversation {self.face}")
+        # EXACT match for /clear, deliberately asymmetric: the menu always
+        # sends it bare, so a trailing word means the owner is talking, and
+        # guessing wrong would silently drop the conversation they were
+        # mid-way through.
+        if stripped.lower() in ("/clear", "/new") \
+                and "clear" in cfg["commands"]:
+            self.reset_context("clear")
             return
 
         if text.strip().lower() == "/help" and "help" in cfg["commands"]:
@@ -546,8 +591,8 @@ class Daemon:
             turn.on_error()
             flush_status(turn.render())
             self.log("turn abandoned — turn lock busy")
-            tg.send(chat_id, f"Something else is mid-thought {self.face} — "
-                             f"give it a moment and try again.")
+            tg.send(chat_id, f"{self.face} Something else is mid-thought "
+                             f"— give it a moment and try again.")
             return
         duration_ms = int((time.time() - started) * 1000)
 
@@ -557,8 +602,8 @@ class Daemon:
             flush_status(turn.render())
             self.record_usage({}, duration_ms, "timeout")
             mins = max(1, cfg["timeout_secs"] // 60)
-            reply = (f"That one hit my {mins}-minute limit and I "
-                     f"stopped {self.face} — try again or /new.")
+            reply = (f"{self.face} That one hit my {mins}-minute limit "
+                     f"and I stopped — try again or /clear.")
             tg.send(chat_id, reply)
             self.post_turn(text, reply, duration_ms, "timeout", {})
             return
@@ -566,7 +611,7 @@ class Daemon:
             turn.on_error()
             flush_status(turn.render())
             self.record_usage({}, duration_ms, "crash")
-            reply = (f"Something went wrong on my side {self.face} — "
+            reply = (f"{self.face} Something went wrong on my side — "
                      f"try again in a moment.")
             tg.send(chat_id, reply)
             self.post_turn(text, reply, duration_ms, "crash", {})
@@ -642,7 +687,7 @@ class Daemon:
                     self.log(f"handler error: {type(exc).__name__}")
                     try:
                         self.tg.send(self.chat_id,
-                                     f"I tripped on that one {self.face} — "
+                                     f"{self.face} I tripped on that one — "
                                      f"logged it; try again.")
                     except Exception:
                         pass

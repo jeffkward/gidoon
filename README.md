@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/jeffkward/gidoon/main/install.sh | 
 
 This command clones gidoon to `~/.gidoon`, asks for an instance name, prompts for the Telegram bot token, captures your chat id (you send the bot an initial message), writes the instance config, installs the `gidoon` command in `~/.local/bin`, and starts a launchd daemon (`com.gidoon.<name>`) that survives reboots and network drops. There is nothing to remember to start or run inside the project itself: the daemon runs every turn in the project's directory for you.
 
-Then just text the bot. While Claude works you see a live tool checklist (`💻 Bash ×2 … ✅`); the answer arrives as its own message. `/new` resets the conversation.
+Then just text the bot. While Claude works you see a live tool checklist (`💻 Bash ×2 … ✅`); the answer arrives as its own message. `/clear` resets the conversation context, same as it does in Claude Code.
 
 Want to run multiple gidoon instances in more than one project? Run the installer again with a different name, project dir, and bot. Instances are independent; the one rule is one bot per instance, because Telegram allows a single poller per bot token.
 
@@ -40,7 +40,7 @@ Want to run multiple gidoon instances in more than one project? Run the installe
 |---|---|
 | `~/.config/gidoon/<name>.toml` | instance config (every key documented in config.example.toml) |
 | `~/.config/gidoon/<name>.env` | bot token + your chat id (chmod 600) |
-| `~/.config/gidoon/<name>-session.json` | conversation state (type `/new` to reset it) |
+| `~/.config/gidoon/<name>-session.json` | conversation state (type `/clear` to reset it) |
 | `~/.config/gidoon/<name>-costs.jsonl` | per-turn receipts (token usage) |
 | `~/.config/gidoon/<name>.log` | daemon log |
 | `~/Library/LaunchAgents/com.gidoon.<name>.plist` | the launchd job |

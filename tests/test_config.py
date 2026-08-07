@@ -18,7 +18,7 @@ class LoadConfig(unittest.TestCase):
         cfg = helpers.write_config(self.dir)
         self.assertEqual(cfg["label"], "testbot")
         self.assertEqual(cfg["emoji"], "🗣")
-        self.assertEqual(cfg["commands"], ["new", "help"])
+        self.assertEqual(cfg["commands"], ["clear", "help"])
         self.assertIsNone(cfg["permission_mode"])
         self.assertEqual(cfg["allowed_tools"], [])
         self.assertIsNone(cfg["model"])

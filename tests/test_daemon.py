@@ -1,5 +1,5 @@
 """Daemon behavior against the FakeTg transport: allowlist filtering,
-/new and /start handling, pre_turn_hook decline, the two-message turn UX
+/clear and /start handling, pre_turn_hook decline, the two-message turn UX
 (status + answer) with stream_claude mocked, self-heal retry, and the
 status renderer's characterized quirks."""
 import json
@@ -59,11 +59,10 @@ class Commands(DaemonCase):
         self.assertEqual(len(tg.sent), 1)
         self.assertIn("Fresh conversation", tg.sent[0][1])
 
-    def test_start_is_ignored_entirely(self):
-        daemon, tg = self.make()
-        daemon.handle_message(helpers.text_msg("/start"))
-        self.assertEqual(tg.sent, [])
-        self.assertEqual(tg.reactions, [])
+    # /start used to be ignored entirely. It now clears context and says
+    # so — Telegram only sends it when the owner's transcript is gone, and
+    # resuming one they cannot see is the wrong default. The four reply
+    # states live in test_reset.py.
 
     def test_non_text_declined(self):
         daemon, tg = self.make()

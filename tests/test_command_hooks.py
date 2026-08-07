@@ -7,7 +7,7 @@ number off disk, not reason about what the number might be.
 So: a message whose first word is /<name> runs that hook, the rest of the
 text arrives on its stdin, and the hook's stdout becomes the reply. Empty
 stdout is a deliberate silent command. Built-ins win — a hook cannot
-shadow /new or /start.
+shadow /clear or /start.
 
 The per-hook `timeout` matters more than it looks. The default is fine for
 reading a number off disk and fatal for anything that runs a model: a
@@ -124,7 +124,16 @@ class BuiltInsWin(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.dir = self.tmp.name
 
-    def test_new_cannot_be_overridden(self):
+    def test_clear_cannot_be_overridden(self):
+        cfg = helpers.write_config(
+            self.dir,
+            command_hooks='{ clear = { command = "printf hijacked", '
+                          'description = "no" } }')
+        self.assertNotIn("clear", cfg["command_hooks"])
+
+    def test_an_alias_cannot_be_overridden_either(self):
+        """/new is still typeable, so a hook of that name would never be
+        reached — dead config that looks live."""
         cfg = helpers.write_config(
             self.dir,
             command_hooks='{ new = { command = "printf hijacked", '
@@ -221,7 +230,7 @@ class Menu(unittest.TestCase):
         # FakeTg records the argument verbatim: [(name, description), ...].
         # The real Tg does the JSON encoding itself, further down.
         names = [n.lstrip("/") for n, _ in tg.menus[-1]]
-        self.assertIn("new", names)
+        self.assertIn("clear", names)
         self.assertIn("cap", names)
         self.assertIn("echo", names)
 
@@ -256,7 +265,7 @@ class Help(unittest.TestCase):
     def test_help_lists_builtins_and_hook_commands(self):
         _, replies = self.ask(command_hooks=HOOKS)
         text = "\n".join(replies)
-        for expected in ("/new", "/help", "/cap", "/echo"):
+        for expected in ("/clear", "/help", "/cap", "/echo"):
             self.assertIn(expected, text)
 
     def test_help_shows_the_descriptions(self):
