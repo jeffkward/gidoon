@@ -46,7 +46,6 @@ API_BASE = "https://api.telegram.org"
 EDIT_INTERVAL = 1.2
 TG_MAX = 4096
 ACK_REACTION = "👀"
-HOOK_TIMEOUT_SECS = 30
 LAUNCH_AGENTS = os.path.expanduser("~/Library/LaunchAgents")
 LOCAL_BIN = os.path.expanduser("~/.local/bin")
 REPO_ROOT = os.path.dirname(os.path.dirname(
@@ -284,6 +283,83 @@ class Daemon:
         core.append_usage(self.cfg["usage_path"], result, duration_ms,
                           exit_label)
 
+    # ── commands ────────────────────────────────────────────────────────
+
+    def register_commands(self):
+        """Publish the '/' menu: enabled built-ins, then the instance's own
+        hooks. Best-effort — a hiccup here must never stop the daemon."""
+        menu = [(f"/{name}", core.COMMANDS[name])
+                for name in self.cfg["commands"]]
+        menu += [(f"/{name}", spec["description"])
+                 for name, spec in self.cfg["command_hooks"].items()]
+        if not menu:
+            return
+        try:
+            self.tg.set_my_commands(menu)
+            self.log(f"command menu registered ({len(menu)} commands)")
+        except TgError as exc:
+            self.log(f"command menu registration failed ({exc.code}) "
+                     f"— continuing")
+
+    def send_help(self):
+        """The command list, rendered from config alone — the registry and
+        the instance's hook descriptions are both already here, so there is
+        no host code to write for this."""
+        lines = [f"{self.face} Commands:"]
+        lines += [f"/{name} — {core.COMMANDS[name]}"
+                  for name in self.cfg["commands"]]
+        lines += [f"/{name} — {spec['description']}"
+                  for name, spec in self.cfg["command_hooks"].items()]
+        lines.append("Anything else is just conversation.")
+        self.tg.send(self.chat_id, "\n".join(lines))
+        self.log("help handled")
+
+    def run_command_hook(self, name, args):
+        """An instance-defined command. The host owns the behaviour, we own
+        the plumbing: args on stdin AND as $1, stdout becomes the reply, and
+        empty stdout is a deliberate silent command.
+
+        Each hook carries its OWN timeout because they are not alike — one
+        reads a number off disk, another may run a model for ten minutes.
+        A single shared limit would SIGKILL the second kind every time."""
+        spec = self.cfg["command_hooks"][name]
+        try:
+            proc = subprocess.run(
+                ["/bin/sh", "-c", spec["command"], name, args],
+                input=args, capture_output=True, text=True,
+                timeout=spec["timeout"], env=core.build_env())
+        except subprocess.TimeoutExpired:
+            self.log(f"/{name} hook timed out after {spec['timeout']}s")
+            self.tg.send(self.chat_id,
+                         f"/{name} didn't finish in time {self.face}")
+            return
+        except OSError as exc:
+            self.log(f"/{name} hook failed ({type(exc).__name__})")
+            self.tg.send(self.chat_id, f"/{name} couldn't run {self.face}")
+            return
+        out = (proc.stdout or "").strip()
+        if proc.returncode != 0:
+            self.log(f"/{name} hook exit {proc.returncode}")
+            if not out:
+                self.tg.send(self.chat_id,
+                             f"/{name} failed {self.face} — nothing to show.")
+                return
+        if out:
+            send_long(self.tg, self.chat_id, out)
+        self.log(f"/{name} handled by hook ({len(out)} chars out)")
+
+    def dispatch_command(self, text):
+        """True iff `text` was a host command and has now been handled.
+        Exact first-word match — /capacity is not /cap."""
+        stripped = text.strip()
+        if not stripped.startswith("/") or len(stripped) < 2:
+            return False
+        name = stripped[1:].split(None, 1)[0].lower()
+        if name not in self.cfg["command_hooks"]:
+            return False
+        self.run_command_hook(name, stripped[1 + len(name):].strip())
+        return True
+
     def post_turn(self, prompt, reply, duration_ms, exit_label, usage):
         """Hand the completed turn to the host project, which usually
         keeps its own record of the conversation (a database behind a web
@@ -313,7 +389,7 @@ class Daemon:
         try:
             proc = subprocess.run(hook, shell=True, input=envelope,
                                   capture_output=True, text=True,
-                                  timeout=HOOK_TIMEOUT_SECS,
+                                  timeout=core.DEFAULT_HOOK_TIMEOUT_SECS,
                                   env=core.build_env())
             if proc.returncode != 0:
                 self.log(f"post_turn_hook exit {proc.returncode}")
@@ -335,7 +411,7 @@ class Daemon:
         try:
             proc = subprocess.run(hook, shell=True, input=text,
                                   capture_output=True, text=True,
-                                  timeout=HOOK_TIMEOUT_SECS,
+                                  timeout=core.DEFAULT_HOOK_TIMEOUT_SECS,
                                   env=core.build_env())
         except (subprocess.TimeoutExpired, OSError) as exc:
             self.log(f"pre_turn_hook failed open ({type(exc).__name__})")
@@ -379,6 +455,15 @@ class Daemon:
             self.save_state()
             self.log("session reset via /new")
             tg.send(chat_id, f"Fresh conversation {self.face}")
+            return
+
+        if text.strip().lower() == "/help" and "help" in cfg["commands"]:
+            self.send_help()
+            return
+
+        # Host commands, handled deterministically — never by the model.
+        # Before the ack and the turn: a command is not a conversation.
+        if self.dispatch_command(text):
             return
 
         # Cheap ack so the phone shows life within seconds, even before
@@ -527,17 +612,7 @@ class Daemon:
 
     def run(self):
         self.log(f"daemon start (instance {self.cfg['name']})")
-        # Register the command menu with Telegram (typing '/' shows the
-        # roster). Best-effort: a hiccup here must never stop the daemon.
-        menu = [(f"/{name}", core.COMMANDS[name])
-                for name in self.cfg["commands"]]
-        if menu:
-            try:
-                self.tg.set_my_commands(menu)
-                self.log(f"command menu registered ({len(menu)} commands)")
-            except TgError as exc:
-                self.log(f"command menu registration failed ({exc.code}) "
-                         f"— continuing")
+        self.register_commands()
         self.drain_backlog()
         backoff = 1
         while True:

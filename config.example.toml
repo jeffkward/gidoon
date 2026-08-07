@@ -45,6 +45,24 @@ cwd = "~/code/myproject"
 # gate). A hook that errors or times out fails OPEN.
 #pre_turn_hook = ""
 
+# Commands the HOST project handles itself, deterministically — never the
+# model. The message's remaining text arrives on the hook's stdin AND as
+# $1; the hook's stdout becomes the reply (print nothing for a deliberately
+# silent command). Names are registered in Telegram's "/" menu and listed
+# by /help. /new, /help and /start are built in and cannot be overridden.
+#
+# `timeout` is per hook and matters: the default (30s) suits reading a
+# number off disk, and would SIGKILL anything that runs a model. Give a
+# workflow-backed command room.
+#[command_hooks.cap]
+#command = "~/myproject/bin/cmd-cap"
+#description = "see or change today's spend cap"
+#
+#[command_hooks.remember]
+#command = "~/myproject/bin/run remember --input-stdin"
+#description = "write something down"
+#timeout = 600
+
 # Command run AFTER every completed turn, with a one-line JSON object on
 # stdin: {instance, prompt, reply, duration_ms, exit, session_id, usage}.
 # `usage` is the runtime's own token block, passed through untranslated so

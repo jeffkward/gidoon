@@ -87,7 +87,7 @@ class PostTurnHook(unittest.TestCase):
         self.assertIn("not much", [t for _, t in tg.sent])
 
     def test_a_hanging_hook_does_not_cost_the_reply(self):
-        with mock.patch.object(D, "HOOK_TIMEOUT_SECS", 0.5):
+        with mock.patch.object(core, "DEFAULT_HOOK_TIMEOUT_SECS", 0.5):
             tg = self.run_turn("sleep 30")
         self.assertIn("not much", [t for _, t in tg.sent])
 

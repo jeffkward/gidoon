@@ -18,7 +18,7 @@ class LoadConfig(unittest.TestCase):
         cfg = helpers.write_config(self.dir)
         self.assertEqual(cfg["label"], "testbot")
         self.assertEqual(cfg["emoji"], "🗣")
-        self.assertEqual(cfg["commands"], ["new"])
+        self.assertEqual(cfg["commands"], ["new", "help"])
         self.assertIsNone(cfg["permission_mode"])
         self.assertEqual(cfg["allowed_tools"], [])
         self.assertIsNone(cfg["model"])
@@ -87,7 +87,7 @@ class LoadConfig(unittest.TestCase):
 
     def test_unknown_command_raises(self):
         with self.assertRaises(core.ConfigError):
-            helpers.write_config(self.dir, commands='["new", "help"]')
+            helpers.write_config(self.dir, commands='["new", "teleport"]')
 
     def test_missing_file_raises(self):
         with self.assertRaises(core.ConfigError):

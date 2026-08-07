@@ -63,12 +63,19 @@ DEFAULT_SYSTEM_PROMPT = (
     "confirm before anything destructive or irreversible."
 )
 
+# How long any hook gets before it is killed. Fine for reading a number off
+# disk, which is what most hooks do. A command backed by a model run needs
+# its own `timeout` — see command_hooks.
+DEFAULT_HOOK_TIMEOUT_SECS = 30
+
 # The command registry — everything an instance MAY enable in its TOML
-# `commands` list. Just /new for now (not even /help); the registry stays
-# a table so instances can add later.
+# `commands` list. Both are rendered from config alone, so neither needs a
+# line of host code: /help lists this table plus the instance's own hooks.
 COMMANDS = {
     "new": "start a fresh conversation (forgets chat history, not the project)",
+    "help": "list the commands this bot understands",
 }
+DEFAULT_COMMANDS = ["new", "help"]
 
 # Sane PATH for the child claude process (and hooks): claude's home, brew,
 # and the system paths — deliberately nothing project- or owner-specific.
@@ -308,8 +315,45 @@ class ConfigError(ValueError):
 _KNOWN_KEYS = {"label", "env_file", "cwd", "permission_mode", "allowed_tools",
                "model", "emoji", "pre_turn_hook", "commands", "timeout_secs",
                "claude_bin", "system_prompt", "log_token_usage",
-               "turn_lock", "post_turn_hook"}
+               "turn_lock", "post_turn_hook", "command_hooks"}
 _REQUIRED_KEYS = ("label", "env_file", "cwd")
+
+
+HOOK_NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
+
+# Names the daemon answers itself, before dispatch. A hook of one of these
+# names would be dead config that looks live, so it is dropped rather than
+# silently ignored at runtime.
+RESERVED_COMMANDS = frozenset(COMMANDS) | {"start"}
+
+
+def _load_command_hooks(raw_hooks):
+    """Normalize the `command_hooks` table: {name: {command, description,
+    timeout}}.
+
+    Unusable entries are DROPPED rather than raising, so one bad hook in a
+    long table cannot stop a mouth from starting — the cost of a typo
+    should be one missing command, not a silent bot."""
+    hooks = {}
+    for name, spec in (raw_hooks or {}).items():
+        name = str(name)
+        if name in RESERVED_COMMANDS:
+            continue
+        if not HOOK_NAME_RE.fullmatch(name):
+            continue
+        command = (spec or {}).get("command")
+        if not command:
+            continue
+        timeout = (spec or {}).get("timeout")
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) \
+                or timeout <= 0:
+            timeout = DEFAULT_HOOK_TIMEOUT_SECS
+        hooks[name] = {
+            "command": str(command),
+            "description": (str(spec.get("description") or f"/{name}"))[:256],
+            "timeout": timeout,
+        }
+    return hooks
 
 
 def load_config(path, state_dir=None):
@@ -350,7 +394,7 @@ def load_config(path, state_dir=None):
     log_usage = raw.get("log_token_usage", True)
     if not isinstance(log_usage, bool):
         raise ConfigError("log_token_usage must be true or false")
-    commands = raw.get("commands", ["new"])
+    commands = raw.get("commands", list(DEFAULT_COMMANDS))
     if not isinstance(commands, list):
         raise ConfigError("commands must be a list")
     for cmd in commands:
@@ -360,6 +404,7 @@ def load_config(path, state_dir=None):
 
     return {
         "name": name,
+        "command_hooks": _load_command_hooks(raw.get("command_hooks")),
         "label": str(raw["label"]),
         "env_file": os.path.expanduser(raw["env_file"]),
         "cwd": os.path.expanduser(raw["cwd"]),
