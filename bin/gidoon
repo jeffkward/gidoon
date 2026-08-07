@@ -284,6 +284,42 @@ class Daemon:
         core.append_usage(self.cfg["usage_path"], result, duration_ms,
                           exit_label)
 
+    def post_turn(self, prompt, reply, duration_ms, exit_label, usage):
+        """Hand the completed turn to the host project, which usually
+        keeps its own record of the conversation (a database behind a web
+        UI, metrics, a token ledger).
+
+        Fire-and-forget BY DESIGN: this runs after the answer is already
+        sent, output is ignored, and any failure — nonzero exit, timeout,
+        missing command — is logged and goes no further. A broken
+        bookkeeping hook is a bookkeeping problem; it must never cost the
+        owner a reply.
+
+        `usage` is the runtime's own block, passed through untranslated so
+        the host can account for tokens without a mapping layer in
+        between. Mapping layers are how a ledger silently reads zero."""
+        hook = self.cfg.get("post_turn_hook")
+        if not hook:
+            return
+        envelope = json.dumps({
+            "instance": self.cfg["name"],
+            "prompt": prompt,
+            "reply": reply,
+            "duration_ms": duration_ms,
+            "exit": exit_label,
+            "session_id": self.state.get("session_id"),
+            "usage": usage or {},
+        }, ensure_ascii=False)
+        try:
+            proc = subprocess.run(hook, shell=True, input=envelope,
+                                  capture_output=True, text=True,
+                                  timeout=HOOK_TIMEOUT_SECS,
+                                  env=core.build_env())
+            if proc.returncode != 0:
+                self.log(f"post_turn_hook exit {proc.returncode}")
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            self.log(f"post_turn_hook failed ({type(exc).__name__})")
+
     # ── pre-turn hook ───────────────────────────────────────────────────
 
     def pre_turn_decline(self, text):
@@ -436,15 +472,19 @@ class Daemon:
             flush_status(turn.render())
             self.record_usage({}, duration_ms, "timeout")
             mins = max(1, cfg["timeout_secs"] // 60)
-            tg.send(chat_id, f"That one hit my {mins}-minute limit and I "
-                             f"stopped {self.face} — try again or /new.")
+            reply = (f"That one hit my {mins}-minute limit and I "
+                     f"stopped {self.face} — try again or /new.")
+            tg.send(chat_id, reply)
+            self.post_turn(text, reply, duration_ms, "timeout", {})
             return
         if subtype == "crash":
             turn.on_error()
             flush_status(turn.render())
             self.record_usage({}, duration_ms, "crash")
-            tg.send(chat_id, f"Something went wrong on my side {self.face} — "
-                             f"try again in a moment.")
+            reply = (f"Something went wrong on my side {self.face} — "
+                     f"try again in a moment.")
+            tg.send(chat_id, reply)
+            self.post_turn(text, reply, duration_ms, "crash", {})
             return
 
         if result.get("session_id"):
@@ -459,6 +499,11 @@ class Daemon:
         final_text = result.get("result") or ""
         send_long(tg, chat_id, final_text)
         self.log(f"turn done ({duration_ms}ms, {len(final_text)} chars out)")
+        # Last, deliberately: the answer is already out the door, so a
+        # slow or broken host hook cannot delay or cost it.
+        self.post_turn(text, final_text, duration_ms,
+                       0 if not result.get("is_error") else 1,
+                       result.get("usage") or {})
 
     # ── the poll loop ───────────────────────────────────────────────────
 

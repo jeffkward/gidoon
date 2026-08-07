@@ -308,7 +308,7 @@ class ConfigError(ValueError):
 _KNOWN_KEYS = {"label", "env_file", "cwd", "permission_mode", "allowed_tools",
                "model", "emoji", "pre_turn_hook", "commands", "timeout_secs",
                "claude_bin", "system_prompt", "log_token_usage",
-               "turn_lock"}
+               "turn_lock", "post_turn_hook"}
 _REQUIRED_KEYS = ("label", "env_file", "cwd")
 
 
@@ -368,6 +368,7 @@ def load_config(path, state_dir=None):
         "model": raw.get("model") or None,
         "emoji": raw.get("emoji", DEFAULT_EMOJI),
         "pre_turn_hook": raw.get("pre_turn_hook") or None,
+        "post_turn_hook": raw.get("post_turn_hook") or None,
         # Unlike the posture keys, absent does NOT mean "no flag" — the
         # identity text is a property of being a gidoon turn. Absent/empty
         # → the built-in default; a set value replaces it wholesale.
