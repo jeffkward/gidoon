@@ -38,7 +38,7 @@ class CommandCase(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def install(self, name, repo="/repo/gidoon"):
-        """Fake an installed instance: its five files + a launchd plist."""
+        """Fake an installed instance: every file it owns + a plist."""
         for suffix in core.INSTANCE_SUFFIXES:
             with open(os.path.join(self.conf, name + suffix), "w") as f:
                 f.write("x")
@@ -67,7 +67,8 @@ class Uninstall(CommandCase):
         self.install("work")
         other_plist = self.install("play")
         D.uninstall_main(["work", "--yes"])
-        self.assertEqual(len(core.instance_files("play", self.conf)), 5)
+        self.assertEqual(len(core.instance_files("play", self.conf)),
+                         len(core.INSTANCE_SUFFIXES))
         self.assertTrue(os.path.exists(other_plist))
 
     def test_unknown_instance_exits_nonzero(self):
@@ -93,7 +94,8 @@ class Uninstall(CommandCase):
         plist = self.install("work")
         with mock.patch("sys.stdin", io.StringIO("n\n")):
             D.uninstall_main(["work"])
-        self.assertEqual(len(core.instance_files("work", self.conf)), 5)
+        self.assertEqual(len(core.instance_files("work", self.conf)),
+                         len(core.INSTANCE_SUFFIXES))
         self.assertTrue(os.path.exists(plist))
         self.assertEqual(self.launchctl, [])
 

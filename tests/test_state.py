@@ -1,4 +1,4 @@
-"""Session save/load round-trip and the costs receipt line shape."""
+"""Session save/load round-trip and the token usage line shape."""
 import json
 import os
 import tempfile
@@ -38,7 +38,7 @@ class Costs(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.path = os.path.join(self.tmp.name, "x-costs.jsonl")
+        self.path = os.path.join(self.tmp.name, "x-usage.jsonl")
 
     def read_lines(self):
         with open(self.path, encoding="utf-8") as f:
@@ -51,7 +51,7 @@ class Costs(unittest.TestCase):
                             "cache_creation_input_tokens": 12181,
                             "cache_read_input_tokens": 17900,
                             "service_tier": "standard"}}
-        core.append_cost(self.path, result, 1234, 0)
+        core.append_usage(self.path, result, 1234, 0)
         (line,) = self.read_lines()
         self.assertEqual(set(line),
                          {"ts", "duration_ms", "num_turns", "input_tokens",
@@ -70,13 +70,13 @@ class Costs(unittest.TestCase):
     def test_no_usd_recorded_even_when_the_result_reports_it(self):
         # Dollars depend on the reader's plan (subscription vs API), so the
         # receipt counts tokens and stays out of that argument.
-        core.append_cost(self.path, {"total_cost_usd": 1.366392}, 1, 0)
+        core.append_usage(self.path, {"total_cost_usd": 1.366392}, 1, 0)
         (line,) = self.read_lines()
         self.assertNotIn("total_cost_usd", line)
         self.assertNotIn("1.366392", json.dumps(line))
 
     def test_timeout_line(self):
-        core.append_cost(self.path, {}, 600000, "timeout")
+        core.append_usage(self.path, {}, 600000, "timeout")
         (line,) = self.read_lines()
         self.assertEqual(line["exit"], "timeout")
         self.assertIsNone(line["num_turns"])
@@ -84,8 +84,8 @@ class Costs(unittest.TestCase):
         self.assertIsNone(line["output_tokens"])
 
     def test_appends(self):
-        core.append_cost(self.path, {}, 1, 0)
-        core.append_cost(self.path, {}, 2, 1)
+        core.append_usage(self.path, {}, 1, 0)
+        core.append_usage(self.path, {}, 2, 1)
         self.assertEqual([l["duration_ms"] for l in self.read_lines()],
                          [1, 2])
 

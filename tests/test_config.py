@@ -23,6 +23,7 @@ class LoadConfig(unittest.TestCase):
         self.assertEqual(cfg["allowed_tools"], [])
         self.assertIsNone(cfg["model"])
         self.assertIsNone(cfg["pre_turn_hook"])
+        self.assertIs(cfg["log_token_usage"], True)
         self.assertEqual(cfg["timeout_secs"], 600)
         self.assertTrue(cfg["claude_bin"].endswith("/.local/bin/claude"))
 
@@ -31,8 +32,8 @@ class LoadConfig(unittest.TestCase):
         self.assertEqual(cfg["name"], "mybot")
         self.assertEqual(cfg["session_path"],
                          os.path.join(self.dir, "mybot-session.json"))
-        self.assertEqual(cfg["costs_path"],
-                         os.path.join(self.dir, "mybot-costs.jsonl"))
+        self.assertEqual(cfg["usage_path"],
+                         os.path.join(self.dir, "mybot-usage.jsonl"))
         self.assertEqual(cfg["log_path"],
                          os.path.join(self.dir, "mybot.log"))
 

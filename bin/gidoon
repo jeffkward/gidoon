@@ -275,6 +275,15 @@ class Daemon:
     def save_state(self):
         core.save_session(self.cfg["session_path"], self.state)
 
+    def record_usage(self, result, duration_ms, exit_label):
+        """Append this turn's token counts — unless the host project has
+        taken over the books (log_token_usage = false), in which case
+        writing them here would just rot a second ledger."""
+        if not self.cfg["log_token_usage"]:
+            return
+        core.append_usage(self.cfg["usage_path"], result, duration_ms,
+                          exit_label)
+
     # ── pre-turn hook ───────────────────────────────────────────────────
 
     def pre_turn_decline(self, text):
@@ -409,7 +418,7 @@ class Daemon:
         if subtype == "timeout":
             turn.on_error()
             flush_status(turn.render())
-            core.append_cost(cfg["costs_path"], {}, duration_ms, "timeout")
+            self.record_usage({}, duration_ms, "timeout")
             mins = max(1, cfg["timeout_secs"] // 60)
             tg.send(chat_id, f"That one hit my {mins}-minute limit and I "
                              f"stopped {self.face} — try again or /new.")
@@ -417,7 +426,7 @@ class Daemon:
         if subtype == "crash":
             turn.on_error()
             flush_status(turn.render())
-            core.append_cost(cfg["costs_path"], {}, duration_ms, "crash")
+            self.record_usage({}, duration_ms, "crash")
             tg.send(chat_id, f"Something went wrong on my side {self.face} — "
                              f"try again in a moment.")
             return
@@ -425,8 +434,8 @@ class Daemon:
         if result.get("session_id"):
             self.state["session_id"] = result["session_id"]
             self.save_state()
-        core.append_cost(cfg["costs_path"], result, duration_ms,
-                         0 if not result.get("is_error") else 1)
+        self.record_usage(result, duration_ms,
+                          0 if not result.get("is_error") else 1)
 
         turn.on_result(is_error=bool(result.get("is_error")))
         flush_status(turn.render())

@@ -116,7 +116,12 @@ LAUNCHD_PREFIX = "com.gidoon."
 # Everything an instance owns under CONFIG_DIR, as "<name>" + suffix. Listed
 # explicitly rather than globbed on "<name>*" so a name can never claim a
 # longer sibling's files ("work" vs "workshop").
-INSTANCE_SUFFIXES = (".toml", ".env", "-session.json", "-costs.jsonl", ".log")
+#
+# "-costs.jsonl" is the pre-2026-08-07 name of the token log and is kept
+# here on purpose: nothing writes it any more, but `uninstall` must still
+# remove one from every machine that ran the older version.
+INSTANCE_SUFFIXES = (".toml", ".env", "-session.json", "-usage.jsonl",
+                     "-costs.jsonl", ".log")
 
 
 def is_valid_instance_name(name):
@@ -217,19 +222,23 @@ class ConfigError(ValueError):
 
 _KNOWN_KEYS = {"label", "env_file", "cwd", "permission_mode", "allowed_tools",
                "model", "emoji", "pre_turn_hook", "commands", "timeout_secs",
-               "claude_bin", "system_prompt"}
+               "claude_bin", "system_prompt", "log_token_usage"}
 _REQUIRED_KEYS = ("label", "env_file", "cwd")
 
 
 def load_config(path, state_dir=None):
     """Load + validate an instance TOML. Returns a plain dict with defaults
-    applied and derived state paths (session/costs/log) keyed by the config
+    applied and derived state paths (session/usage/log) keyed by the config
     file's stem — ~/.config/gidoon/<name>-session.json etc.
 
     permission_mode ABSENT or empty string → None → the daemon passes no
     --permission-mode flag, so the turn inherits the user's own default
     mode. Same rule for allowed_tools (empty = no --allowedTools) and
     model (absent = no --model).
+
+    log_token_usage is the exception that proves that rule: absent → True,
+    because a standalone mouth is the only thing keeping books. A host
+    project that records turns itself sets it false.
     """
     state_dir = state_dir or CONFIG_DIR
     name = os.path.splitext(os.path.basename(path))[0]
@@ -252,6 +261,9 @@ def load_config(path, state_dir=None):
     if not isinstance(allowed_tools, list) or \
             not all(isinstance(t, str) for t in allowed_tools):
         raise ConfigError("allowed_tools must be a list of strings")
+    log_usage = raw.get("log_token_usage", True)
+    if not isinstance(log_usage, bool):
+        raise ConfigError("log_token_usage must be true or false")
     commands = raw.get("commands", ["new"])
     if not isinstance(commands, list):
         raise ConfigError("commands must be a list")
@@ -275,11 +287,12 @@ def load_config(path, state_dir=None):
         # → the built-in default; a set value replaces it wholesale.
         "system_prompt": raw.get("system_prompt") or DEFAULT_SYSTEM_PROMPT,
         "commands": commands,
+        "log_token_usage": log_usage,
         "timeout_secs": int(raw.get("timeout_secs", DEFAULT_TIMEOUT_SECS)),
         "claude_bin": os.path.expanduser(
             raw.get("claude_bin", DEFAULT_CLAUDE_BIN)),
         "session_path": os.path.join(state_dir, f"{name}-session.json"),
-        "costs_path": os.path.join(state_dir, f"{name}-costs.jsonl"),
+        "usage_path": os.path.join(state_dir, f"{name}-usage.jsonl"),
         "log_path": os.path.join(state_dir, f"{name}.log"),
     }
 
@@ -315,17 +328,17 @@ def save_session(path, state):
     os.replace(tmp, path)
 
 
-# ── costs receipt ───────────────────────────────────────────────────────────
+# ── token usage log ─────────────────────────────────────────────────────────
 
-def append_cost(path, result, duration_ms, exit_label):
-    """One plain jsonl line per turn — a receipt, NOT enforcement. Spend
+def append_usage(path, result, duration_ms, exit_label):
+    """One plain jsonl line per turn — a record, NOT enforcement. Spend
     control is the brain's job (a harness plugs its cap in via the
     pre_turn_hook); gidoon just keeps honest books.
 
     Tokens, never dollars: `claude -p` reports a total_cost_usd, but what a
     turn actually costs depends on the reader's plan (a subscription seat
-    makes the number fiction), so the receipt records the four token counts
-    and leaves the pricing to whoever reads it."""
+    makes the number fiction), so this records the four token counts and
+    leaves the pricing to whoever reads it."""
     usage = result.get("usage") or {}
     line = {
         "ts": now_iso(),

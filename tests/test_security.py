@@ -193,7 +193,7 @@ class SecretsStayOut(SecurityCase):
         self.assertNotIn("sure thing", log)
         self.assertIn("turn done", log)
 
-    def test_costs_receipt_holds_no_message_content(self):
+    def test_usage_log_holds_no_message_content(self):
         daemon, tg = self.make()
 
         def fake_stream(prompt, session_id, on_event, **kw):
@@ -202,7 +202,7 @@ class SecretsStayOut(SecurityCase):
 
         with mock.patch.object(core, "stream_claude", fake_stream):
             daemon.handle_message(helpers.text_msg("secret question"))
-        with open(daemon.cfg["costs_path"], encoding="utf-8") as f:
+        with open(daemon.cfg["usage_path"], encoding="utf-8") as f:
             self.assertNotIn("secret", f.read())
 
 

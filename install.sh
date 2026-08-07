@@ -376,7 +376,7 @@ echo
 echo "gidoon instance '$NAME' is live: @$BOT_USER ↔ $PROJECT_DIR"
 echo "  log:     $LOG_FILE"
 echo "  session: $CONF_DIR/$NAME-session.json   (/new resets)"
-echo "  costs:   $CONF_DIR/$NAME-costs.jsonl"
+echo "  usage:   $CONF_DIR/$NAME-usage.jsonl"
 echo
 echo "Bonus — anything on this machine can now message you through the bot:"
 echo "  gidoon send $NAME \"backup finished ✅\""

@@ -143,8 +143,8 @@ class TurnFlow(DaemonCase):
         self.assertEqual(tg.sent[1][1], "the answer")
         # session persisted
         self.assertEqual(daemon.state["session_id"], "sess-9")
-        # costs receipt
-        with open(daemon.cfg["costs_path"], encoding="utf-8") as f:
+        # token usage log
+        with open(daemon.cfg["usage_path"], encoding="utf-8") as f:
             (line,) = [json.loads(l) for l in f]
         self.assertEqual(line["exit"], 0)
         self.assertEqual(line["num_turns"], 2)
@@ -179,7 +179,7 @@ class TurnFlow(DaemonCase):
             daemon.handle_message(helpers.text_msg("hi"))
         self.assertIn("2-minute limit", tg.sent[-1][1])
         self.assertIn("⚠️", tg.edits[-1][2])
-        with open(daemon.cfg["costs_path"], encoding="utf-8") as f:
+        with open(daemon.cfg["usage_path"], encoding="utf-8") as f:
             (line,) = [json.loads(l) for l in f]
         self.assertEqual(line["exit"], "timeout")
 

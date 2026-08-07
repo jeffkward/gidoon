@@ -1,7 +1,7 @@
 # gidoon instance config — copy to ~/.config/gidoon/<name>.toml
 # The file's basename is the instance name: <name>.toml drives
 #   ~/.config/gidoon/<name>-session.json   (offset + claude session id)
-#   ~/.config/gidoon/<name>-costs.jsonl    (per-turn receipt: tokens + timing)
+#   ~/.config/gidoon/<name>-usage.jsonl    (per-turn token counts + timing)
 #   ~/.config/gidoon/<name>.log            (event types/lengths only — never
 #                                           message content, never the token)
 # launchd job: com.gidoon.<name> (rendered by install.sh)
@@ -41,9 +41,16 @@ cwd = "~/code/myproject"
 # Command run before EVERY turn; the inbound text arrives on its stdin.
 # Nonzero exit = the turn is DECLINED and the hook's stdout becomes the
 # reply. This is where a harness plugs in spend caps, quiet hours, etc. —
-# gidoon itself enforces nothing (the costs jsonl is a receipt, not a
+# gidoon itself enforces nothing (the usage jsonl is a record, not a
 # gate). A hook that errors or times out fails OPEN.
 #pre_turn_hook = ""
+
+# Log this instance's per-turn token counts to
+# ~/.config/gidoon/<name>-usage.jsonl. ON by default: a standalone mouth is
+# the only thing keeping books. Set false when the HOST project records
+# turns itself — otherwise every turn lands in two ledgers and one of them
+# rots. Nothing else about the turn changes.
+#log_token_usage = false
 
 # Appended to the system prompt of EVERY turn. ABSENT (the default) uses
 # gidoon's built-in text, which tells the turn what's happening — the
