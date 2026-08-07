@@ -57,6 +57,37 @@ nightly-report.sh | gidoon send <name>     # no message arg → stdin
 
 Cron jobs, build scripts, other daemons: anything that can run a command can notify you, on the same chat thread as the conversation. It's fire-and-forget: `send` lobs the message over the fence and exits. No listener, no polling, nothing that can collide with the daemon.
 
+### Command Line Gotchas
+
+**Double Quotes:**
+
+Inside **double** quotes your shell expands `$name`, `$1`, `${x}`, `` `cmd` ``, and `$(cmd)` before gidoon ever runs — so a price or a variable-looking word silently disappears:
+
+```
+gidoon send work "can I borrow $5 bux?"     →  "can I borrow  bux?"
+```
+
+**Single Quotes:**
+
+Use **single** quotes for anything you type by hand. 
+
+
+```
+gidoon send work 'can I borrow $5 bux?'     →  "can I borrow $5 bux?"
+```
+
+**Solution: Pipe it in!**
+
+
+For generated text (logs, reports, anything with amounts or symbols in it) keep the message off the command line entirely and pipe it in:
+
+```
+printf '%s\n' "$report" | gidoon send work
+gidoon send work < message.txt
+```
+
+gidoon receives whatever the shell hands it; text the shell already discarded is unrecoverable. This matters most for agents driving `gidoon send` from a tool call, where a mangled message looks perfectly fine in the logs.
+
 ## Managing Instances
 
 ```
