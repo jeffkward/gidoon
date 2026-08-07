@@ -393,25 +393,41 @@ class Daemon:
 
         started = time.time()
         self.log(f"turn start ({len(text)} chars in)")
-        result = core.stream_claude(
-            text, self.state.get("session_id"), on_event,
-            cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"], log=self.log,
-            claude_bin=cfg["claude_bin"],
-            permission_mode=cfg["permission_mode"],
-            allowed_tools=cfg["allowed_tools"], model=cfg["model"],
-            system_prompt=cfg["system_prompt"])
-        # Self-heal: if the stored session can't be resumed, forget it and
-        # retry once from a fresh session so the turn still succeeds.
-        if result.get("subtype") == "resume_failed":
-            self.state["session_id"] = None
-            self.save_state()
-            result = core.stream_claude(
-                text, None, on_event,
-                cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"],
-                log=self.log, claude_bin=cfg["claude_bin"],
-                permission_mode=cfg["permission_mode"],
-                allowed_tools=cfg["allowed_tools"], model=cfg["model"],
-                system_prompt=cfg["system_prompt"])
+        # One lock around BOTH attempts: the resume-failed retry is part of
+        # the same logical turn, so releasing between them would let a host
+        # project's turn slip in and interleave with ours.
+        try:
+            with core.turn_lock(cfg["turn_lock"]):
+                result = core.stream_claude(
+                    text, self.state.get("session_id"), on_event,
+                    cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"],
+                    log=self.log, claude_bin=cfg["claude_bin"],
+                    permission_mode=cfg["permission_mode"],
+                    allowed_tools=cfg["allowed_tools"], model=cfg["model"],
+                    system_prompt=cfg["system_prompt"])
+                # Self-heal: if the stored session can't be resumed, forget
+                # it and retry once fresh so the turn still succeeds.
+                if result.get("subtype") == "resume_failed":
+                    self.state["session_id"] = None
+                    self.save_state()
+                    result = core.stream_claude(
+                        text, None, on_event,
+                        cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"],
+                        log=self.log, claude_bin=cfg["claude_bin"],
+                        permission_mode=cfg["permission_mode"],
+                        allowed_tools=cfg["allowed_tools"],
+                        model=cfg["model"],
+                        system_prompt=cfg["system_prompt"])
+        except TimeoutError:
+            # Something else has held the session for the whole window.
+            # Say so plainly rather than running anyway — overlapping
+            # --resume turns is exactly what the lock exists to prevent.
+            turn.on_error()
+            flush_status(turn.render())
+            self.log("turn abandoned — turn lock busy")
+            tg.send(chat_id, f"Something else is mid-thought {self.face} — "
+                             f"give it a moment and try again.")
+            return
         duration_ms = int((time.time() - started) * 1000)
 
         subtype = result.get("subtype")

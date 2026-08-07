@@ -26,6 +26,8 @@ core` sees no difference.
 
 Stdlib only. Python >= 3.11 (tomllib).
 """
+import contextlib
+import errno
 import json
 import os
 import plistlib
@@ -217,6 +219,86 @@ def log_line(path, line):
         f.write(f"{now_iso()} {line}\n")
 
 
+# ── turn lock: sharing one claude session with another process ──────────────
+
+DEFAULT_LOCK_TIMEOUT_SECS = 300
+DEFAULT_STALE_LOCK_SECS = 900
+
+
+def acquire_turn_lock(path, timeout=None, stale_secs=None):
+    """Block until the lock directory at `path` is ours.
+
+    This exists for one situation: a host project runs its OWN turns
+    against the same claude session this daemon resumes (its web UI, its
+    CLI). Two `--resume` processes on one session at once corrupts the
+    conversation, so both sides contend here.
+
+    The rule is a CONTRACT with that other process, not an implementation
+    detail. Two clauses, and both sides must agree on both:
+
+      1. the lock IS the directory — created with mkdir, which is atomic
+         on APFS and ext4, so no library, no daemon, and no shared
+         language are needed to join
+      2. a lock older than stale_secs (default 900) is assumed abandoned
+         and broken, because a holder that died mid-turn would otherwise
+         mute the mouth until a human removed a directory by hand
+
+    Break clause 1 and the lock stops being exclusive. Break clause 2 in
+    either direction and you get the failure this prevents — too eager and
+    two turns overlap, too patient and a crash wedges the conversation.
+
+    How often a waiter retries is NOT part of the contract.
+
+    Raises TimeoutError if the other side holds it for the whole window.
+    """
+    timeout = DEFAULT_LOCK_TIMEOUT_SECS if timeout is None else timeout
+    stale_secs = DEFAULT_STALE_LOCK_SECS if stale_secs is None else stale_secs
+    deadline = time.time() + timeout
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    while True:
+        try:
+            os.mkdir(path)
+            return
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            try:
+                if time.time() - os.path.getmtime(path) > stale_secs:
+                    os.rmdir(path)
+                    continue
+            except OSError:
+                # It vanished (or became unreadable) between the mkdir and
+                # the stat — either way, go around and try to take it.
+                continue
+            if time.time() >= deadline:
+                raise TimeoutError(f"turn lock busy: {path}")
+            time.sleep(0.25)
+
+
+def release_turn_lock(path):
+    """Drop the lock. Quiet if we never held it — release must never be
+    the thing that raises on an already-failing path."""
+    with contextlib.suppress(OSError):
+        os.rmdir(path)
+
+
+@contextlib.contextmanager
+def turn_lock(path, timeout=None):
+    """Hold the lock for the body, or do nothing at all when `path` is
+    falsy — an instance with no host project sharing its session pays no
+    cost and creates no files."""
+    if not path:
+        yield
+        return
+    acquire_turn_lock(path, timeout=timeout)
+    try:
+        yield
+    finally:
+        release_turn_lock(path)
+
+
 # ── config ──────────────────────────────────────────────────────────────────
 
 class ConfigError(ValueError):
@@ -225,7 +307,8 @@ class ConfigError(ValueError):
 
 _KNOWN_KEYS = {"label", "env_file", "cwd", "permission_mode", "allowed_tools",
                "model", "emoji", "pre_turn_hook", "commands", "timeout_secs",
-               "claude_bin", "system_prompt", "log_token_usage"}
+               "claude_bin", "system_prompt", "log_token_usage",
+               "turn_lock"}
 _REQUIRED_KEYS = ("label", "env_file", "cwd")
 
 
@@ -291,6 +374,8 @@ def load_config(path, state_dir=None):
         "system_prompt": raw.get("system_prompt") or DEFAULT_SYSTEM_PROMPT,
         "commands": commands,
         "log_token_usage": log_usage,
+        "turn_lock": (os.path.expanduser(raw["turn_lock"])
+                      if raw.get("turn_lock") else None),
         "timeout_secs": int(raw.get("timeout_secs", DEFAULT_TIMEOUT_SECS)),
         "claude_bin": os.path.expanduser(
             raw.get("claude_bin", DEFAULT_CLAUDE_BIN)),

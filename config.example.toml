@@ -45,6 +45,14 @@ cwd = "~/code/myproject"
 # gate). A hook that errors or times out fails OPEN.
 #pre_turn_hook = ""
 
+# Serialize turns with ANOTHER process that runs turns on this same claude
+# session — a host project's web UI or CLI, say. Two `claude -p --resume`
+# processes on one session at once corrupts the conversation. Both sides
+# must use the same path AND the same rule: the lock is a directory made
+# with mkdir, and one older than 15 minutes is treated as abandoned.
+# Absent (the default) = this daemon is the only writer and takes no lock.
+#turn_lock = "~/myproject/state/.turn-lock"
+
 # Log this instance's per-turn token counts to
 # ~/.config/gidoon/<name>-usage.jsonl. ON by default: a standalone mouth is
 # the only thing keeping books. Set false when the HOST project records
