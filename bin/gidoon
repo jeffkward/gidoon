@@ -274,6 +274,32 @@ class Daemon:
     def save_state(self):
         core.save_session(self.cfg["session_path"], self.state)
 
+    def refresh_session(self):
+        """Adopt the session id from disk before relying on it.
+
+        The session file has a second writer whenever the host project runs
+        a chat surface of its own: it clears context by nulling session_id
+        here, and it starts conversations this side should continue. A copy
+        cached when the daemon booted is stale the moment either happens —
+        and because save_state writes the whole dict, the stale id gets
+        written back, silently undoing a clear the owner performed.
+
+        Only session_id is adopted. `offset` belongs to this process alone
+        and the value in memory can be ahead of the file, so taking the
+        whole dict would rewind our place in the update stream and answer
+        the same message twice.
+
+        An unreadable file is NOT a cleared one. load_session flattens both
+        to a fresh dict, which is right at startup and wrong here — it
+        would turn a transient read error into a lost conversation."""
+        try:
+            with open(self.cfg["session_path"], encoding="utf-8") as f:
+                on_disk = json.load(f)
+        except (OSError, ValueError):
+            return
+        if isinstance(on_disk, dict):
+            self.state["session_id"] = on_disk.get("session_id")
+
     def record_usage(self, result, duration_ms, exit_label):
         """Append this turn's token counts — unless the host project has
         taken over the books (log_token_usage = false), in which case
@@ -315,7 +341,8 @@ class Daemon:
         advances it AFTER this returns. (A token inherited with a backlog
         already queued reads as "already fresh" instead — a slightly cooler
         greeting on an unusual install, not worth persisting a flag for.)"""
-        had_session = bool(self.state.get("session_id"))
+        ended = self.state.get("session_id")
+        had_session = bool(ended)
         first_contact = self.state.get("offset", 0) == 0 and not had_session
         self.state["session_id"] = None
         self.save_state()
@@ -333,6 +360,10 @@ class Daemon:
         self.log(f"context reset via /{source} "
                  f"(had_session={had_session}, first={first_contact})")
         self.tg.send(self.chat_id, f"{self.face} {reply}")
+        # After the confirmation, never before: the owner's reset is already
+        # done and acknowledged, so the host's bookkeeping cannot be allowed
+        # to delay it — or, if it hangs, to delay it by the whole timeout.
+        self.after_reset(source, had_session, ended)
 
     def send_help(self):
         """The command list, rendered from config alone — the registry and
@@ -428,6 +459,46 @@ class Daemon:
                 self.log(f"post_turn_hook exit {proc.returncode}")
         except (subprocess.TimeoutExpired, OSError) as exc:
             self.log(f"post_turn_hook failed ({type(exc).__name__})")
+
+    # ── reset hook ──────────────────────────────────────────────────────
+
+    def after_reset(self, source, had_session, ended):
+        """Tell the host project that the context is gone.
+
+        A host that keeps its own record of the conversation — a database
+        behind a web UI, typically — now holds messages the model no longer
+        remembers, and nothing in that record says so. Given two surfaces,
+        the owner clears on one and the other still shows a conversation
+        that looks answerable. This is how that record learns.
+
+        Fire-and-forget, for the same reason as post_turn but more sharply:
+        the reset has ALREADY happened and been confirmed. There is nothing
+        left to fail into. A hook that exits nonzero, hangs, or does not
+        exist gets logged and goes no further.
+
+        `ended` is the session that was just discarded. It is dead by the
+        time anyone reads it, which is the point — it is the only name the
+        host has for the conversation it is being asked to draw a line
+        under. `had_session` distinguishes a real clear from a no-op, so
+        the host does not have to infer it from a null id."""
+        hook = self.cfg.get("reset_hook")
+        if not hook:
+            return
+        envelope = json.dumps({
+            "instance": self.cfg["name"],
+            "source": source,
+            "session_id": ended,
+            "had_session": had_session,
+        }, ensure_ascii=False)
+        try:
+            proc = subprocess.run(hook, shell=True, input=envelope,
+                                  capture_output=True, text=True,
+                                  timeout=core.DEFAULT_HOOK_TIMEOUT_SECS,
+                                  env=core.build_env())
+            if proc.returncode != 0:
+                self.log(f"reset_hook exit {proc.returncode}")
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            self.log(f"reset_hook failed ({type(exc).__name__})")
 
     # ── pre-turn hook ───────────────────────────────────────────────────
 
@@ -564,6 +635,10 @@ class Daemon:
         # project's turn slip in and interleave with ours.
         try:
             with core.turn_lock(cfg["turn_lock"]):
+                # Inside the lock on purpose: whoever else writes this file
+                # holds the same lock for their own turns, so this is the
+                # one moment the value cannot be mid-change.
+                self.refresh_session()
                 result = core.stream_claude(
                     text, self.state.get("session_id"), on_event,
                     cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"],

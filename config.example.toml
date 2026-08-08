@@ -73,6 +73,20 @@ cwd = "~/code/myproject"
 # Pair it with log_token_usage = false so the turn is recorded once.
 #post_turn_hook = "~/myproject/bin/record-turn"
 
+# Runs when the context is cleared (/clear, or Telegram's /start). JSON on
+# stdin: instance, source ("clear" or "start"), session_id (the one just
+# discarded), had_session (whether anything was actually forgotten).
+#
+# For a host project that keeps its own record of the conversation: that
+# record outlives any runtime session, so after a clear it holds messages
+# the model no longer remembers and nothing in it says so. Given two
+# surfaces — a phone and a web UI — the owner clears on one and the other
+# still shows a conversation that looks answerable. This is how it learns
+# to draw the line. Fire-and-forget like post_turn_hook, and more so: the
+# reset has already happened AND been confirmed, so there is nothing left
+# for a failure to protect.
+#reset_hook = "~/myproject/bin/mark-cleared"
+
 # Serialize turns with ANOTHER process that runs turns on this same claude
 # session — a host project's web UI or CLI, say. Two `claude -p --resume`
 # processes on one session at once corrupts the conversation. Both sides
