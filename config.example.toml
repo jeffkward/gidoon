@@ -35,6 +35,15 @@ cwd = "~/code/myproject"
 # Model override (--model). Absent = inherit your default.
 #model = ""
 
+# Setting sources for the child claude process (--setting-sources).
+# ABSENT (the default) passes NO flag, so turns load whatever
+# settings.json layers this project itself uses — same as your
+# interactive sessions. Set "project" to exclude your personal
+# user-level settings (global defaultMode, enabled plugins) from every
+# turn, e.g. when this project's turns should be isolated from your own
+# everyday Claude Code config.
+#setting_sources = ""
+
 # The face this instance wears in the status checklist and replies.
 #emoji = "🗣"
 

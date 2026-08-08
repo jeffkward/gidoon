@@ -22,6 +22,7 @@ class LoadConfig(unittest.TestCase):
         self.assertIsNone(cfg["permission_mode"])
         self.assertEqual(cfg["allowed_tools"], [])
         self.assertIsNone(cfg["model"])
+        self.assertIsNone(cfg["setting_sources"])
         self.assertIsNone(cfg["pre_turn_hook"])
         self.assertIs(cfg["log_token_usage"], True)
         self.assertEqual(cfg["timeout_secs"], 600)
@@ -57,6 +58,20 @@ class LoadConfig(unittest.TestCase):
         cfg = helpers.write_config(self.dir,
                                    permission_mode='"bypassPermissions"')
         self.assertEqual(cfg["permission_mode"], "bypassPermissions")
+
+    def test_setting_sources_absent_means_none(self):
+        # No opinion by default — a turn loads whatever settings.json
+        # layers the host project itself uses.
+        cfg = helpers.write_config(self.dir)
+        self.assertIsNone(cfg["setting_sources"])
+
+    def test_empty_setting_sources_means_none(self):
+        cfg = helpers.write_config(self.dir, setting_sources='""')
+        self.assertIsNone(cfg["setting_sources"])
+
+    def test_explicit_setting_sources_kept(self):
+        cfg = helpers.write_config(self.dir, setting_sources='"project"')
+        self.assertEqual(cfg["setting_sources"], "project")
 
     def test_overrides_applied(self):
         cfg = helpers.write_config(

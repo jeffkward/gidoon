@@ -645,7 +645,8 @@ class Daemon:
                     log=self.log, claude_bin=cfg["claude_bin"],
                     permission_mode=cfg["permission_mode"],
                     allowed_tools=cfg["allowed_tools"], model=cfg["model"],
-                    system_prompt=cfg["system_prompt"])
+                    system_prompt=cfg["system_prompt"],
+                    setting_sources=cfg["setting_sources"])
                 # Self-heal: if the stored session can't be resumed, forget
                 # it and retry once fresh so the turn still succeeds.
                 if result.get("subtype") == "resume_failed":
@@ -658,7 +659,8 @@ class Daemon:
                         permission_mode=cfg["permission_mode"],
                         allowed_tools=cfg["allowed_tools"],
                         model=cfg["model"],
-                        system_prompt=cfg["system_prompt"])
+                        system_prompt=cfg["system_prompt"],
+                        setting_sources=cfg["setting_sources"])
         except TimeoutError:
             # Something else has held the session for the whole window.
             # Say so plainly rather than running anyway — overlapping

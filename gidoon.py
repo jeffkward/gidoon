@@ -324,7 +324,8 @@ class ConfigError(ValueError):
 _KNOWN_KEYS = {"label", "env_file", "cwd", "permission_mode", "allowed_tools",
                "model", "emoji", "pre_turn_hook", "commands", "timeout_secs",
                "claude_bin", "system_prompt", "log_token_usage",
-               "turn_lock", "post_turn_hook", "reset_hook", "command_hooks"}
+               "turn_lock", "post_turn_hook", "reset_hook", "command_hooks",
+               "setting_sources"}
 _REQUIRED_KEYS = ("label", "env_file", "cwd")
 
 
@@ -374,8 +375,12 @@ def load_config(path, state_dir=None):
 
     permission_mode ABSENT or empty string → None → the daemon passes no
     --permission-mode flag, so the turn inherits the user's own default
-    mode. Same rule for allowed_tools (empty = no --allowedTools) and
-    model (absent = no --model).
+    mode. Same rule for allowed_tools (empty = no --allowedTools),
+    model (absent = no --model), and setting_sources (absent = no
+    --setting-sources — the turn loads whatever settings.json layers the
+    host project itself uses; gidoon has no opinion here, a host that
+    wants its turns isolated from the owner's personal user-level
+    settings sets setting_sources = "project" explicitly).
 
     log_token_usage is the exception that proves that rule: absent → True,
     because a standalone mouth is the only thing keeping books. A host
@@ -424,6 +429,7 @@ def load_config(path, state_dir=None):
         "cwd": os.path.expanduser(raw["cwd"]),
         "permission_mode": raw.get("permission_mode") or None,
         "allowed_tools": allowed_tools,
+        "setting_sources": raw.get("setting_sources") or None,
         "model": raw.get("model") or None,
         "emoji": raw.get("emoji", DEFAULT_EMOJI),
         "pre_turn_hook": raw.get("pre_turn_hook") or None,
@@ -529,12 +535,19 @@ from gidoon_render import (  # noqa: F401  (re-exported)
 # ── the turn ────────────────────────────────────────────────────────────────
 
 def build_cmd(claude_bin, session_id=None, permission_mode=None,
-              allowed_tools=None, model=None, system_prompt=None):
+              allowed_tools=None, model=None, system_prompt=None,
+              setting_sources=None):
     """The claude argv for one turn. The prompt is NEVER here — it goes
     over stdin (see stream_claude). Optional postures are optional flags:
     absent config → absent flag → inherit the user's own defaults.
     system_prompt travels as argv (unlike the inbound message, it's
-    owner-written config, not untrusted input)."""
+    owner-written config, not untrusted input).
+
+    setting_sources follows the same absent-means-no-flag rule as the
+    others: gidoon itself has no opinion on whether a turn should see the
+    owner's personal user-level settings — that's the host project's
+    call, made per-instance in its own TOML, not something to hardcode
+    here for every project gidoon is ever added to."""
     cmd = [claude_bin, "-p"]
     if session_id:
         cmd += ["--resume", session_id]
@@ -547,13 +560,15 @@ def build_cmd(claude_bin, session_id=None, permission_mode=None,
         cmd += ["--model", model]
     if system_prompt:
         cmd += ["--append-system-prompt", system_prompt]
+    if setting_sources:
+        cmd += ["--setting-sources", setting_sources]
     return cmd
 
 
 def stream_claude(prompt, session_id, on_event, cwd,
                   timeout_secs=DEFAULT_TIMEOUT_SECS, log=None,
                   claude_bin=None, permission_mode=None, allowed_tools=None,
-                  model=None, system_prompt=None):
+                  model=None, system_prompt=None, setting_sources=None):
     """Run one claude turn; dispatch parsed events; return the result event
     (or {'subtype': 'timeout'} / {'subtype': 'crash'} /
     {'subtype': 'resume_failed'} markers).
@@ -566,7 +581,8 @@ def stream_claude(prompt, session_id, on_event, cwd,
     cmd = build_cmd(claude_bin, session_id=session_id,
                     permission_mode=permission_mode,
                     allowed_tools=allowed_tools, model=model,
-                    system_prompt=system_prompt)
+                    system_prompt=system_prompt,
+                    setting_sources=setting_sources)
     # Binary pipes + raw os.read, deliberately: mixing select() with a
     # buffered TextIOWrapper is a classic wedge — readline() buffers ahead,
     # so the result line can sit in Python's buffer while select() waits on

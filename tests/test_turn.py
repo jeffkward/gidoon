@@ -71,6 +71,13 @@ class BuildCmd(unittest.TestCase):
         self.assertNotIn("--append-system-prompt",
                          core.build_cmd("/x/claude", system_prompt=None))
 
+    def test_setting_sources_flag_only_when_set(self):
+        cmd = core.build_cmd("/x/claude", setting_sources="project")
+        i = cmd.index("--setting-sources")
+        self.assertEqual(cmd[i + 1], "project")
+        self.assertNotIn("--setting-sources",
+                         core.build_cmd("/x/claude", setting_sources=None))
+
     def test_prompt_never_in_argv(self):
         # build_cmd doesn't even accept a prompt — the argv is fully
         # determined by flags; the prompt goes over stdin in stream_claude.
