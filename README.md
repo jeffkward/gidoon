@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/jeffkward/gidoon/main/install.sh | 
 
 This command clones gidoon to `~/.gidoon`, asks for an instance name, prompts for the Telegram bot token, captures your chat id (you send the bot an initial message), writes the instance config, installs the `gidoon` command in `~/.local/bin`, and starts a launchd daemon (`com.gidoon.<name>`) that survives reboots and network drops. There is nothing to remember to start or run inside the project itself: the daemon runs every turn in the project's directory for you.
 
-Then just text the bot. While Claude works you see a live tool checklist (`💻 Bash ×2 … ✅`); the answer arrives as its own message. `/clear` resets the conversation context, same as it does in Claude Code.
+Then just text the bot. While Claude works you see a live tool checklist (`💻 Bash ×2 … ✅`); the answer arrives as its own message. `/clear` resets the conversation context, same as it does in Claude Code, and `/help` lists whatever commands your instance understands. (Telegram sends `/start` when a chat is new or was deleted and reopened — gidoon treats that as a clear too, since resuming a conversation you can no longer see is the wrong default.)
 
 Want to run multiple gidoon instances in more than one project? Run the installer again with a different name, project dir, and bot. Instances are independent; the one rule is one bot per instance, because Telegram allows a single poller per bot token.
 
@@ -41,7 +41,7 @@ Want to run multiple gidoon instances in more than one project? Run the installe
 | `~/.config/gidoon/<name>.toml` | instance config (every key documented in config.example.toml) |
 | `~/.config/gidoon/<name>.env` | bot token + your chat id (chmod 600) |
 | `~/.config/gidoon/<name>-session.json` | conversation state (type `/clear` to reset it) |
-| `~/.config/gidoon/<name>-costs.jsonl` | per-turn receipts (token usage) |
+| `~/.config/gidoon/<name>-usage.jsonl` | per-turn token counts (off when a host keeps the books) |
 | `~/.config/gidoon/<name>.log` | daemon log |
 | `~/Library/LaunchAgents/com.gidoon.<name>.plist` | the launchd job |
 | `~/.local/bin/gidoon` | the `gidoon` command (symlink into the clone) |
@@ -100,6 +100,24 @@ gidoon uninstall --all             # stop and remove EVERY instance
 `update` pulls the latest gidoon and restarts your instances.
 
 `uninstall` shows exactly what it will stop and delete, then asks (`--yes` skips the prompt). It removes the launchd job and all instance files, and removing the last instance also removes the `gidoon` command. The clone itself stays put, so `rm -rf ~/.gidoon` is the last step if you want it gone entirely. Deleting the bot is up to you, in BotFather.
+
+## Being a Project's Mouth
+
+Standalone, gidoon needs none of this — it keeps its own books and answers on its own. But a project that already has a chat surface of its own (a web UI, a CLI, a database of the conversation) wants Telegram to be *another mouth on the same conversation*, not a second one running beside it. Five optional keys make that possible, all documented in full in `config.example.toml`:
+
+| Key | What the host gets |
+|---|---|
+| `turn_lock` | Serializes turns with the host's own, so two `claude -p --resume` processes never run on one session and corrupt it. Both sides use the same path and the same rule. |
+| `post_turn_hook` | Each completed turn as JSON on stdin — prompt, reply, duration, and the runtime's own token block passed through untranslated, so the host can keep a ledger with no mapping layer to rot. |
+| `reset_hook` | Fires when context is cleared. The host's record of the conversation outlives the session, so without this it holds messages the model no longer remembers and nothing says so. |
+| `command_hooks` | The host defines its own slash commands, descriptions and all; they appear in Telegram's menu and in `/help` with no gidoon code involved. |
+| `log_token_usage` | Set false when the host records turns itself, so the same turn doesn't land in two ledgers and leave one to rot. |
+
+Both hook families are fire-and-forget on purpose: they run after the answer is already sent, output is ignored, and any failure is logged and goes no further. Bookkeeping must never cost the owner a reply.
+
+The session file is shared state under this arrangement — the host clears context by nulling `session_id` in it, and starts conversations gidoon should continue — so gidoon re-reads it under the turn lock rather than trusting a copy cached at startup.
+
+`gidoon_render.py` is deliberately dependency-free (its import set is exactly `{"re"}`, and a test enforces that) so a host can vendor it and draw the identical tool checklist on its own surface instead of writing a second one that quietly drifts.
 
 ## Why not a Telegram MCP plugin?
 
