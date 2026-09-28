@@ -383,6 +383,11 @@ class Daemon:
         the plumbing: args on stdin AND as $1, stdout becomes the reply, and
         empty stdout is a deliberate silent command.
 
+        A hook configured with `turn = "allow"` may instead print
+        {"turn": "<prompt>"}; that prompt is returned for the caller to run
+        as an ordinary turn, and nothing is sent here. Only a hook that
+        exited 0 can hand one back.
+
         Each hook carries its OWN timeout because they are not alike — one
         reads a number off disk, another may run a model for ten minutes.
         A single shared limit would SIGKILL the second kind every time."""
@@ -402,6 +407,16 @@ class Daemon:
             self.tg.send(self.chat_id, f"{self.face} /{name} couldn't run")
             return
         out = (proc.stdout or "").strip()
+        if spec["turn"] == "allow" and proc.returncode == 0 \
+                and out.startswith("{"):
+            try:
+                answer = json.loads(out)
+            except ValueError:
+                answer = None
+            prompt = answer.get("turn") if isinstance(answer, dict) else None
+            if isinstance(prompt, str) and prompt.strip():
+                self.log(f"/{name} handed back a turn ({len(prompt)} chars)")
+                return prompt
         if proc.returncode != 0:
             self.log(f"/{name} hook exit {proc.returncode}")
             if not out:
@@ -413,16 +428,17 @@ class Daemon:
         self.log(f"/{name} handled by hook ({len(out)} chars out)")
 
     def dispatch_command(self, text):
-        """True iff `text` was a host command and has now been handled.
+        """(handled, turn). `handled` is True iff `text` was a host command;
+        `turn` is the prompt it handed back to run as a turn, else None.
         Exact first-word match — /capacity is not /cap."""
         stripped = text.strip()
         if not stripped.startswith("/") or len(stripped) < 2:
-            return False
+            return False, None
         name = stripped[1:].split(None, 1)[0].lower()
         if name not in self.cfg["command_hooks"]:
-            return False
-        self.run_command_hook(name, stripped[1 + len(name):].strip())
-        return True
+            return False, None
+        return True, self.run_command_hook(
+            name, stripped[1 + len(name):].strip())
 
     def post_turn(self, prompt, reply, duration_ms, exit_label, usage):
         """Hand the completed turn to the host project, which usually
@@ -617,9 +633,13 @@ class Daemon:
             return
 
         # Host commands, handled deterministically — never by the model.
-        # Before the ack and the turn: a command is not a conversation.
-        if self.dispatch_command(text):
+        # Before the ack and the turn: a command is not a conversation —
+        # unless its hook hands back a prompt, which then runs as one.
+        handled, turn_text = self.dispatch_command(text)
+        if handled and turn_text is None:
             return
+        if turn_text is not None:
+            text = turn_text
 
         # Cheap ack so the phone shows life within seconds, even before
         # the status message lands. Cosmetic — never let it block a turn.

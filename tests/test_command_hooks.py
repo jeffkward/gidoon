@@ -297,3 +297,90 @@ class Help(unittest.TestCase):
 
         with mock.patch.object(core, "stream_claude", must_not_run):
             daemon.handle_message(helpers.text_msg("/help"))
+
+
+class HookHandsBackATurn(unittest.TestCase):
+    """`turn = "allow"` lets a hook answer {"turn": "<prompt>"} instead of a
+    reply. The mouth then runs that prompt as an ordinary turn — ack, live
+    tool status, the turn lock and every turn hook — which a command's own
+    reply path has none of. Without the key, the same output is just text."""
+
+    ALLOWED = ('{ go = { command = "printf \'{\\"turn\\": \\"do the thing\\"}\'", '
+               'description = "hands back", turn = "allow" }, '
+               'plain = { command = "printf \'just words\'", '
+               'description = "replies", turn = "allow" }, '
+               'notallowed = { command = "printf \'{\\"turn\\": \\"x\\"}\'", '
+               'description = "no key" } }')
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = self.tmp.name
+        cfg = helpers.write_config(self.dir, command_hooks=self.ALLOWED)
+        self.tg = helpers.FakeTg()
+        self.daemon = helpers.make_daemon(cfg, self.tg)
+        self.prompts = []
+
+    def fake_stream(self, p, sid, on_event, **kw):
+        self.prompts.append(p)
+        return {"type": "result", "result": "done", "session_id": "s"}
+
+    def send(self, text):
+        with mock.patch.object(core, "stream_claude", self.fake_stream):
+            self.daemon.handle_message(helpers.text_msg(text))
+
+    def test_the_key_is_loaded(self):
+        hooks = self.daemon.cfg["command_hooks"]
+        self.assertEqual(hooks["go"]["turn"], "allow")
+        self.assertIsNone(hooks["notallowed"]["turn"])
+
+    def test_an_unknown_value_does_not_allow(self):
+        cfg = helpers.write_config(
+            self.dir, command_hooks='{ x = { command = "true", turn = "yes" } }')
+        self.assertIsNone(cfg["command_hooks"]["x"]["turn"])
+
+    def test_a_handed_back_prompt_runs_as_a_turn(self):
+        self.send("/go")
+        self.assertEqual(self.prompts, ["do the thing"])
+        self.assertIn("done", [t for _, t in self.tg.sent])
+
+    def test_a_handed_back_turn_gets_the_ack(self):
+        self.send("/go")
+        self.assertTrue(self.tg.reactions, "no ack reaction")
+
+    def test_a_handed_back_turn_passes_the_pre_turn_check(self):
+        cfg = helpers.write_config(self.dir, command_hooks=self.ALLOWED,
+                                   pre_turn_hook='"echo capped; exit 1"')
+        daemon = helpers.make_daemon(cfg, self.tg)
+        with mock.patch.object(core, "stream_claude", self.fake_stream):
+            daemon.handle_message(helpers.text_msg("/go"))
+        self.assertEqual(self.prompts, [])
+        self.assertIn("capped", [t for _, t in self.tg.sent])
+
+    def test_plain_output_from_an_allowed_hook_is_still_a_reply(self):
+        self.send("/plain")
+        self.assertEqual(self.prompts, [])
+        self.assertIn("just words", [t for _, t in self.tg.sent])
+
+    def test_without_the_key_the_json_is_just_text(self):
+        self.send("/notallowed")
+        self.assertEqual(self.prompts, [])
+        self.assertIn('{"turn": "x"}', [t for _, t in self.tg.sent])
+
+    def test_a_failing_hook_never_hands_back_a_turn(self):
+        cfg = helpers.write_config(self.dir, command_hooks=(
+            '{ bad = { command = "printf \'{\\"turn\\": \\"x\\"}\'; exit 2", '
+            'turn = "allow" } }'))
+        daemon = helpers.make_daemon(cfg, self.tg)
+        with mock.patch.object(core, "stream_claude", self.fake_stream):
+            daemon.handle_message(helpers.text_msg("/bad"))
+        self.assertEqual(self.prompts, [])
+
+    def test_an_empty_turn_is_not_a_turn(self):
+        cfg = helpers.write_config(self.dir, command_hooks=(
+            '{ empty = { command = "printf \'{\\"turn\\": \\"  \\"}\'", '
+            'turn = "allow" } }'))
+        daemon = helpers.make_daemon(cfg, self.tg)
+        with mock.patch.object(core, "stream_claude", self.fake_stream):
+            daemon.handle_message(helpers.text_msg("/empty"))
+        self.assertEqual(self.prompts, [])

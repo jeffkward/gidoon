@@ -71,6 +71,12 @@ cwd = "~/code/myproject"
 # `timeout` is per hook and matters: the default (30s) suits reading a
 # number off disk, and would SIGKILL anything that runs a model. Give a
 # workflow-backed command room.
+#
+# `turn = "allow"` lets a hook hand the message back to the model instead of
+# replying: print {"turn": "<prompt>"} and that prompt runs as an ordinary
+# turn — the ack, live tool status, pre_turn_hook, allowed_tools_hook and
+# post_turn_hook all apply. Any other output is still the reply, and a hook
+# without the key can never start a turn.
 #[command_hooks.cap]
 #command = "~/myproject/bin/cmd-cap"
 #description = "see or change today's spend cap"
@@ -79,6 +85,11 @@ cwd = "~/code/myproject"
 #command = "~/myproject/bin/run remember --input-stdin"
 #description = "write something down"
 #timeout = 600
+#
+#[command_hooks.ask]
+#command = "~/myproject/bin/cmd-ask"
+#description = "ask with extra context"
+#turn = "allow"
 
 # Command run AFTER every completed turn, with a one-line JSON object on
 # stdin: {instance, prompt, reply, duration_ms, exit, session_id, usage}.

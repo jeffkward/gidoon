@@ -341,7 +341,8 @@ RESERVED_COMMANDS = frozenset(COMMANDS) | frozenset(COMMAND_ALIASES) \
 
 def _load_command_hooks(raw_hooks):
     """Normalize the `command_hooks` table: {name: {command, description,
-    timeout}}.
+    timeout, turn}}. `turn` is "allow" or None; any other value is None,
+    because a hook may only hand back a turn when that was spelled out.
 
     Unusable entries are DROPPED rather than raising, so one bad hook in a
     long table cannot stop a mouth from starting — the cost of a typo
@@ -364,6 +365,7 @@ def _load_command_hooks(raw_hooks):
             "command": str(command),
             "description": (str(spec.get("description") or f"/{name}"))[:256],
             "timeout": timeout,
+            "turn": "allow" if (spec or {}).get("turn") == "allow" else None,
         }
     return hooks
 
