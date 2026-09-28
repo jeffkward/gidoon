@@ -54,6 +54,14 @@ cwd = "~/code/myproject"
 # gate). A hook that errors or times out fails OPEN.
 #pre_turn_hook = ""
 
+# Command run before EVERY turn to widen that one turn's tools; the inbound
+# text arrives on its stdin. Print {"allowed_tools_add": ["Tool", ...]} to
+# add tools for this turn only (on top of allowed_tools), or {} for none.
+# It can only ever widen: an error, timeout, nonzero exit or any other
+# output FAILS CLOSED to allowed_tools as configured. This is where a host
+# plugs in a time-boxed elevation the owner switches on themselves.
+#allowed_tools_hook = ""
+
 # Commands the HOST project handles itself, deterministically — never the
 # model. The message's remaining text arrives on the hook's stdin AND as
 # $1; the hook's stdout becomes the reply (print nothing for a deliberately

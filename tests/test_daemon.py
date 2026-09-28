@@ -267,3 +267,50 @@ class DrainBacklog(DaemonCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AllowedToolsHook(DaemonCase):
+    """A host can widen one turn's tools; anything short of a clean answer
+    leaves the configured tools exactly as they are."""
+
+    def hook_script(self, body):
+        path = os.path.join(self.dir, "tools-hook.sh")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\n" + body)
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+        return path
+
+    def tools_used(self, **cfg):
+        daemon, tg = self.make(allowed_tools='["Read"]', **cfg)
+        with mock.patch.object(core, "stream_claude",
+                               return_value={"type": "result",
+                                             "result": "ran"}) as run:
+            daemon.handle_message(helpers.text_msg("go"))
+        return run.call_args.kwargs["allowed_tools"]
+
+    def test_no_hook_uses_the_configured_tools(self):
+        self.assertEqual(self.tools_used(), ["Read"])
+
+    def test_hook_adds_tools_for_the_turn(self):
+        path = self.hook_script(
+            'echo \'{"allowed_tools_add": ["Bash", "Read", "Edit"]}\'\n')
+        self.assertEqual(self.tools_used(allowed_tools_hook=f'"{path}"'),
+                         ["Read", "Bash", "Edit"])
+
+    def test_empty_answer_adds_nothing(self):
+        path = self.hook_script("echo '{}'\n")
+        self.assertEqual(self.tools_used(allowed_tools_hook=f'"{path}"'), ["Read"])
+
+    def test_garbage_or_failure_adds_nothing(self):
+        for body in ("echo not-json\n", "echo '{\"allowed_tools_add\": 5}'\n",
+                     "echo '{\"allowed_tools_add\": [1]}'\n",
+                     "echo '[\"Bash\"]'\n",
+                     "echo '{\"allowed_tools_add\": [\"Bash\"]}'\nexit 3\n"):
+            path = self.hook_script(body)
+            self.assertEqual(self.tools_used(allowed_tools_hook=f'"{path}"'),
+                             ["Read"], body)
+
+    def test_missing_hook_adds_nothing(self):
+        self.assertEqual(
+            self.tools_used(allowed_tools_hook='"/nonexistent/tools-hook"'),
+            ["Read"])

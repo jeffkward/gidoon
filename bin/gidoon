@@ -533,6 +533,45 @@ class Daemon:
                 f"{self.face} Not right now — a pre-turn check declined that"
         return None
 
+    # ── allowed-tools hook ──────────────────────────────────────────────
+
+    def turn_tools(self, text):
+        """The tools for this one turn: the configured allowed_tools, plus
+        any the allowed_tools_hook adds. The hook gets the inbound text on stdin
+        and may print {"allowed_tools_add": ["Tool", ...]}. Anything short
+        of that — no hook, an error, a timeout, a nonzero exit, output that
+        isn't that shape — FAILS CLOSED to the configured tools, because
+        this hook can only ever widen a turn."""
+        base = list(self.cfg["allowed_tools"])
+        hook = self.cfg.get("allowed_tools_hook")
+        if not hook:
+            return base
+        try:
+            proc = subprocess.run(hook, shell=True, input=text,
+                                  capture_output=True, text=True,
+                                  timeout=core.DEFAULT_HOOK_TIMEOUT_SECS,
+                                  env=core.build_env())
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            self.log(f"allowed_tools_hook failed closed ({type(exc).__name__})")
+            return base
+        if proc.returncode != 0:
+            self.log(f"allowed_tools_hook failed closed (exit {proc.returncode})")
+            return base
+        try:
+            answer = json.loads(proc.stdout or "{}")
+        except ValueError:
+            self.log("allowed_tools_hook failed closed (output is not JSON)")
+            return base
+        extra = answer.get("allowed_tools_add", []) \
+            if isinstance(answer, dict) else None
+        if not isinstance(extra, list) or \
+                not all(isinstance(t, str) for t in extra):
+            self.log("allowed_tools_hook failed closed (unexpected shape)")
+            return base
+        if extra:
+            self.log(f"allowed_tools_hook widened this turn by {len(extra)} tool(s)")
+        return base + [t for t in extra if t not in base]
+
     # ── message handling ────────────────────────────────────────────────
 
     def handle_message(self, msg):
@@ -639,12 +678,13 @@ class Daemon:
                 # holds the same lock for their own turns, so this is the
                 # one moment the value cannot be mid-change.
                 self.refresh_session()
+                tools = self.turn_tools(text)
                 result = core.stream_claude(
                     text, self.state.get("session_id"), on_event,
                     cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"],
                     log=self.log, claude_bin=cfg["claude_bin"],
                     permission_mode=cfg["permission_mode"],
-                    allowed_tools=cfg["allowed_tools"], model=cfg["model"],
+                    allowed_tools=tools, model=cfg["model"],
                     system_prompt=cfg["system_prompt"],
                     setting_sources=cfg["setting_sources"])
                 # Self-heal: if the stored session can't be resumed, forget
@@ -657,7 +697,7 @@ class Daemon:
                         cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"],
                         log=self.log, claude_bin=cfg["claude_bin"],
                         permission_mode=cfg["permission_mode"],
-                        allowed_tools=cfg["allowed_tools"],
+                        allowed_tools=tools,
                         model=cfg["model"],
                         system_prompt=cfg["system_prompt"],
                         setting_sources=cfg["setting_sources"])

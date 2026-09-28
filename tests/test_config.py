@@ -24,6 +24,7 @@ class LoadConfig(unittest.TestCase):
         self.assertIsNone(cfg["model"])
         self.assertIsNone(cfg["setting_sources"])
         self.assertIsNone(cfg["pre_turn_hook"])
+        self.assertIsNone(cfg["allowed_tools_hook"])
         self.assertIs(cfg["log_token_usage"], True)
         self.assertEqual(cfg["timeout_secs"], 600)
         self.assertTrue(cfg["claude_bin"].endswith("/.local/bin/claude"))
