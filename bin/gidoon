@@ -586,7 +586,62 @@ class Daemon:
             return base
         if extra:
             self.log(f"allowed_tools_hook widened this turn by {len(extra)} tool(s)")
+        self._turn_answer = answer
         return base + [t for t in extra if t not in base]
+
+    # The settings an allowed_tools_hook may also open for one turn. Each is
+    # optional; one bad value and the turn runs exactly as configured.
+    _TURN_MODES = ("default", "acceptEdits", "auto")
+    _TURN_SOURCES = ("user", "project", "local")
+    _TURN_MAX_SECS = 4 * 60 * 60
+
+    def turn_settings(self, text):
+        """This turn's tools and settings. Beyond allowed_tools_add, the
+        hook may answer permission_mode, setting_sources, timeout_secs
+        (1–14400) and uncapped (true: no --allowedTools at all), so a host
+        can let a turn run like an ordinary interactive session for a while.
+        Any of them malformed and the whole turn keeps its configured
+        settings and tools."""
+        cfg = self.cfg
+        self._turn_answer = {}
+        tools = self.turn_tools(text)
+        settings = {"allowed_tools": tools,
+                    "permission_mode": cfg["permission_mode"],
+                    "setting_sources": cfg["setting_sources"],
+                    "timeout_secs": cfg["timeout_secs"]}
+        answer = self._turn_answer
+        opened = dict(settings)
+        mode = answer.get("permission_mode")
+        if mode is not None:
+            if mode not in self._TURN_MODES:
+                return self._turn_closed(settings, "permission_mode")
+            opened["permission_mode"] = mode
+        sources = answer.get("setting_sources")
+        if sources is not None:
+            parts = sources.split(",") if isinstance(sources, str) else None
+            if not parts or any(p not in self._TURN_SOURCES for p in parts):
+                return self._turn_closed(settings, "setting_sources")
+            opened["setting_sources"] = sources
+        secs = answer.get("timeout_secs")
+        if secs is not None:
+            if not isinstance(secs, int) or isinstance(secs, bool) \
+                    or not 1 <= secs <= self._TURN_MAX_SECS:
+                return self._turn_closed(settings, "timeout_secs")
+            opened["timeout_secs"] = secs
+        uncapped = answer.get("uncapped")
+        if uncapped is not None:
+            if not isinstance(uncapped, bool):
+                return self._turn_closed(settings, "uncapped")
+            if uncapped:
+                opened["allowed_tools"] = []
+        if opened != settings:
+            self.log("allowed_tools_hook opened this turn's settings")
+        return opened
+
+    def _turn_closed(self, settings, key):
+        self.log(f"allowed_tools_hook failed closed (bad {key})")
+        settings["allowed_tools"] = list(self.cfg["allowed_tools"])
+        return settings
 
     # ── message handling ────────────────────────────────────────────────
 
@@ -698,15 +753,16 @@ class Daemon:
                 # holds the same lock for their own turns, so this is the
                 # one moment the value cannot be mid-change.
                 self.refresh_session()
-                tools = self.turn_tools(text)
+                turn_cfg = self.turn_settings(text)
                 result = core.stream_claude(
                     text, self.state.get("session_id"), on_event,
-                    cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"],
+                    cwd=cfg["cwd"], timeout_secs=turn_cfg["timeout_secs"],
                     log=self.log, claude_bin=cfg["claude_bin"],
-                    permission_mode=cfg["permission_mode"],
-                    allowed_tools=tools, model=cfg["model"],
+                    permission_mode=turn_cfg["permission_mode"],
+                    allowed_tools=turn_cfg["allowed_tools"],
+                    model=cfg["model"],
                     system_prompt=cfg["system_prompt"],
-                    setting_sources=cfg["setting_sources"])
+                    setting_sources=turn_cfg["setting_sources"])
                 # Self-heal: if the stored session can't be resumed, forget
                 # it and retry once fresh so the turn still succeeds.
                 if result.get("subtype") == "resume_failed":
@@ -714,13 +770,14 @@ class Daemon:
                     self.save_state()
                     result = core.stream_claude(
                         text, None, on_event,
-                        cwd=cfg["cwd"], timeout_secs=cfg["timeout_secs"],
+                        cwd=cfg["cwd"],
+                        timeout_secs=turn_cfg["timeout_secs"],
                         log=self.log, claude_bin=cfg["claude_bin"],
-                        permission_mode=cfg["permission_mode"],
-                        allowed_tools=tools,
+                        permission_mode=turn_cfg["permission_mode"],
+                        allowed_tools=turn_cfg["allowed_tools"],
                         model=cfg["model"],
                         system_prompt=cfg["system_prompt"],
-                        setting_sources=cfg["setting_sources"])
+                        setting_sources=turn_cfg["setting_sources"])
         except TimeoutError:
             # Something else has held the session for the whole window.
             # Say so plainly rather than running anyway — overlapping

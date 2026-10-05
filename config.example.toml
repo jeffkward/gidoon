@@ -60,6 +60,13 @@ cwd = "~/code/myproject"
 # It can only ever widen: an error, timeout, nonzero exit or any other
 # output FAILS CLOSED to allowed_tools as configured. This is where a host
 # plugs in a time-boxed elevation the owner switches on themselves.
+# The same answer may also open this one turn's settings, for a host that
+# lets the owner run a turn like an ordinary interactive session:
+#   "permission_mode": "default" | "acceptEdits" | "auto"
+#   "setting_sources": e.g. "user,project"   (user, project, local)
+#   "timeout_secs":    1–14400
+#   "uncapped":        true = no --allowedTools at all for this turn
+# Any one of them malformed and the whole turn runs exactly as configured.
 #allowed_tools_hook = ""
 
 # Commands the HOST project handles itself, deterministically — never the

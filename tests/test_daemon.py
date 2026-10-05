@@ -310,6 +310,38 @@ class AllowedToolsHook(DaemonCase):
             self.assertEqual(self.tools_used(allowed_tools_hook=f'"{path}"'),
                              ["Read"], body)
 
+    def turn_kwargs(self, body, **cfg):
+        path = self.hook_script(body)
+        daemon, tg = self.make(allowed_tools='["Read"]',
+                               allowed_tools_hook=f'"{path}"', **cfg)
+        with mock.patch.object(core, "stream_claude",
+                               return_value={"type": "result",
+                                             "result": "ran"}) as run:
+            daemon.handle_message(helpers.text_msg("go"))
+        return run.call_args.kwargs
+
+    def test_hook_can_open_a_turn_fully(self):
+        kw = self.turn_kwargs(
+            'echo \'{"allowed_tools_add": ["Bash"], "permission_mode": '
+            '"auto", "setting_sources": "user,project", "timeout_secs": '
+            '3600, "uncapped": true}\'\n')
+        self.assertEqual(kw["permission_mode"], "auto")
+        self.assertEqual(kw["setting_sources"], "user,project")
+        self.assertEqual(kw["timeout_secs"], 3600)
+        self.assertEqual(kw["allowed_tools"], [])     # no --allowedTools cap
+
+    def test_a_bad_turn_setting_falls_back_to_the_configured_turn(self):
+        for body in (
+                'echo \'{"permission_mode": "yolo"}\'\n',
+                'echo \'{"setting_sources": "user;rm"}\'\n',
+                'echo \'{"timeout_secs": "long"}\'\n',
+                'echo \'{"timeout_secs": 999999}\'\n',
+                'echo \'{"uncapped": "yes"}\'\n'):
+            kw = self.turn_kwargs(body)
+            self.assertEqual(kw["allowed_tools"], ["Read"], body)
+            self.assertIsNone(kw["permission_mode"], body)
+            self.assertIsNone(kw["setting_sources"], body)
+
     def test_missing_hook_adds_nothing(self):
         self.assertEqual(
             self.tools_used(allowed_tools_hook='"/nonexistent/tools-hook"'),
