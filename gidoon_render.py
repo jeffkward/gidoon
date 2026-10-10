@@ -8,8 +8,9 @@ slowly disagree.
 
 That means three rules, each pinned by tests/test_render_module.py:
 
-  · imports `re` and NOTHING else — no I/O, no config, no policy. A new
-    import here becomes a new dependency in every project that vendored it.
+  · imports `re` and `json` and NOTHING else — both stdlib, no I/O, no
+    config, no policy. A new import here becomes a new dependency in every
+    project that vendored it; these two add none.
   · imports standalone; gidoon.py must not be needed.
   · gidoon.py re-exports every name below, so `import gidoon as core` keeps
     working and both halves stay the same objects.
@@ -18,6 +19,7 @@ Named for where it lives AFTER being vendored, not where it was born: a
 plain `render.py` dropped onto a host project's sys.path is a collision
 waiting to happen.
 """
+import json
 import re
 
 
@@ -168,3 +170,46 @@ def collapse_tool_lines(completed):
     repeats. ["💻 Bash ×2", "🧰 Tool Search", …]. Pure."""
     return [f"{emoji} {display}{count_suffix(count)}"
             for emoji, display, count in collapse_tool_runs(completed)]
+
+
+# ── choices: a reply may end with a fenced ```choices block ─────────────────
+# A JSON list of short strings. A host project can draw them as buttons;
+# Telegram draws a numbered list (the owner replies with a number or in
+# their own words). An entry starting with "/" is a command the owner must
+# send as typed, so it is never numbered. Render-only: nothing here acts.
+CHOICES_FENCE = re.compile(r"(?:^|\n)\s*```choices[ \t]*\n(.*?)\n```[ \t]*\Z",
+                           re.S)
+
+
+def split_choices(text):
+    """(the text without its choices block, the choices) — or (text, [])
+    when there is no well-formed block at the very end."""
+    text = text or ""
+    m = CHOICES_FENCE.search(text)
+    if not m:
+        return text, []
+    try:
+        choices = json.loads(m.group(1))
+    except ValueError:
+        return text, []
+    if not isinstance(choices, list) or not all(
+            isinstance(c, str) and c.strip() for c in choices):
+        return text, []
+    return text[:m.start()].rstrip(), [c.strip() for c in choices]
+
+
+def render_choices(text):
+    """Telegram's rendering: numbered plain entries, then the commands
+    on one line."""
+    body, choices = split_choices(text)
+    if not choices:
+        return text
+    plain = [c for c in choices if not c.startswith("/")]
+    commands = [c for c in choices if c.startswith("/")]
+    lines = []
+    if plain:
+        lines += [f"{i + 1}. {c}" for i, c in enumerate(plain)]
+        lines.append("Reply with a number, or in your own words.")
+    if commands:
+        lines.append("Or send: " + " · ".join(commands))
+    return (body + "\n\n" if body else "") + "\n".join(lines)

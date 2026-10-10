@@ -4,7 +4,7 @@ This module exists to be COPIED into a host project's import namespace, so
 that project's own surface renders a turn exactly the way the daemon does.
 That imposes rules nothing else in gidoon has to obey:
 
-  · it may import `re` and nothing else — no I/O, no config, no policy,
+  · it may import `re` and `json` and nothing else — no I/O, no config, no policy,
     nothing that could reach out of the host project's process
   · it must import standalone, without gidoon.py
   · gidoon.py re-exports every name, so `import gidoon as core` is
@@ -33,13 +33,15 @@ EXPORTS = (
     "humanize_tool_name", "title_words", "format_tool_label",
     "collapse_tool_runs", "count_suffix", "collapse_tool_lines",
     "extract_text", "extract_tools",
+    "CHOICES_FENCE", "split_choices", "render_choices",
 )
 
 
 class Purity(unittest.TestCase):
-    def test_it_imports_nothing_but_re(self):
+    def test_it_imports_nothing_but_re_and_json(self):
         """A vendored file that grows an import grows a dependency in
-        every project that copied it."""
+        every project that copied it; json is stdlib with no I/O, so it
+        adds none."""
         tree = ast.parse(open(MODULE, encoding="utf-8").read())
         imported = set()
         for node in ast.walk(tree):
@@ -47,7 +49,7 @@ class Purity(unittest.TestCase):
                 imported.update(a.name.split(".")[0] for a in node.names)
             elif isinstance(node, ast.ImportFrom):
                 imported.add((node.module or "").split(".")[0])
-        self.assertEqual(imported, {"re"})
+        self.assertEqual(imported, {"re", "json"})
 
     def test_it_imports_standalone_without_gidoon(self):
         """The vendored copy lands somewhere gidoon.py does not exist."""
@@ -94,3 +96,41 @@ class BehaviourIsUnchanged(unittest.TestCase):
             core.collapse_tool_lines([("💻", "Bash"), ("💻", "Bash"),
                                       ("📖", "Read")]),
             ["💻 Bash ×2", "📖 Read"])
+
+
+REPLY = ("Here is the outline.\n\nChange anything, or say \"looks good\".\n\n"
+         "```choices\n[\"Looks good\", \"Change a step\", \"/go\"]\n```")
+
+
+class Choices(unittest.TestCase):
+    def test_split_choices(self):
+        text, choices = gidoon_render.split_choices(REPLY)
+        self.assertEqual(choices, ["Looks good", "Change a step", "/go"])
+        self.assertTrue(text.endswith('say "looks good".'))
+        self.assertNotIn("```", text)
+
+    def test_split_leaves_anything_else_alone(self):
+        s = gidoon_render.split_choices
+        self.assertEqual(s("plain"), ("plain", []))
+        self.assertEqual(s(""), ("", []))
+        self.assertEqual(s("```choices\n[1, 2]\n```"),
+                         ("```choices\n[1, 2]\n```", []))
+        self.assertEqual(s("```choices\nnot json\n```")[1], [])
+        self.assertEqual(s('```choices\n{"a": 1}\n```')[1], [])
+        self.assertEqual(s('a\n```choices\n["x"]\n```\nmore')[1], [])
+        self.assertEqual(s("```choices\n[]\n```"), ("", []))
+
+    def test_render_numbers_the_plain_ones_and_names_the_commands(self):
+        out = gidoon_render.render_choices(REPLY)
+        self.assertEqual(out, (
+            'Here is the outline.\n\nChange anything, or say "looks good".'
+            "\n\n1. Looks good\n2. Change a step\n"
+            "Reply with a number, or in your own words.\nOr send: /go"))
+        self.assertEqual(gidoon_render.render_choices("plain"), "plain")
+        only = gidoon_render.render_choices(
+            'x\n\n```choices\n["/a", "/b"]\n```')
+        self.assertEqual(only, "x\n\nOr send: /a · /b")
+
+    def test_gidoon_reexports_them(self):
+        self.assertIs(core.split_choices, gidoon_render.split_choices)
+        self.assertIs(core.render_choices, gidoon_render.render_choices)

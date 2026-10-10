@@ -117,7 +117,7 @@ Both hook families are fire-and-forget on purpose: they run after the answer is 
 
 The session file is shared state under this arrangement — the host clears context by nulling `session_id` in it, and starts conversations gidoon should continue — so gidoon re-reads it under the turn lock rather than trusting a copy cached at startup.
 
-`gidoon_render.py` is deliberately dependency-free (its import set is exactly `{"re"}`, and a test enforces that) so a host can vendor it and draw the identical tool checklist on its own surface instead of writing a second one that quietly drifts.
+`gidoon_render.py` is deliberately dependency-free (its import set is exactly `{"re", "json"}`, and a test enforces that) so a host can vendor it and draw the identical tool checklist on its own surface instead of writing a second one that quietly drifts.
 
 ## Why not a Telegram MCP plugin?
 

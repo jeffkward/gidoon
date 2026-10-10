@@ -219,6 +219,13 @@ class SendLong(unittest.TestCase):
         D.send_long(tg, 42, "")
         self.assertEqual(tg.sent, [(42, "(empty reply)")])
 
+    def test_a_choices_block_is_sent_rendered(self):
+        tg = helpers.FakeTg()
+        D.send_long(tg, 42, 'Pick.\n\n```choices\n["A", "/go"]\n```')
+        self.assertEqual(tg.sent, [(42, "Pick.\n\n1. A\n"
+                                    "Reply with a number, or in your own "
+                                    "words.\nOr send: /go")])
+
 
 class RenderStatus(unittest.TestCase):
     def test_running_absorbs_matching_last_run(self):

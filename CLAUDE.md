@@ -32,7 +32,7 @@ instances out from under it. Keep that scoping if you touch update.
 Layout: `gidoon.py` (the engine: config, session state, turn machinery —
 where the tests point) · `gidoon_render.py` (the pure render layer:
 tool labels, checklist collapsing, event parsing — imports `re` and
-nothing else, because a host project vendors this file whole; `gidoon.py`
+`json` and nothing else (both stdlib, no I/O), because a host project vendors this file whole; `gidoon.py`
 re-exports every name) · `bin/gidoon` (the daemon: Telegram transport +
 conversation UX) · `install.sh` (interactive macOS bootstrap) ·
 `config.example.toml` (every key, documented) · `tests/` (stdlib

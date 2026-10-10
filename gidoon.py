@@ -532,6 +532,9 @@ from gidoon_render import (  # noqa: F401  (re-exported)
     collapse_tool_lines,
     extract_text,
     extract_tools,
+    CHOICES_FENCE,
+    split_choices,
+    render_choices,
 )
 
 

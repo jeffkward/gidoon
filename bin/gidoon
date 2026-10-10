@@ -253,7 +253,7 @@ class TurnStatus:
 
 
 def send_long(tg, chat_id, text):
-    text = text or "(empty reply)"
+    text = core.render_choices(text or "") or "(empty reply)"
     for i in range(0, len(text), TG_MAX):
         tg.send(chat_id, text[i:i + TG_MAX])
 
