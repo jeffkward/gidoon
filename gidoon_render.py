@@ -177,8 +177,8 @@ def collapse_tool_lines(completed):
 # Telegram draws a numbered list (the owner replies with a number or in
 # their own words). An entry starting with "/" is a command the owner must
 # send as typed, so it is never numbered. Render-only: nothing here acts.
-CHOICES_FENCE = re.compile(r"(?:^|\n)\s*```choices[ \t]*\n(.*?)\n```[ \t]*\Z",
-                           re.S)
+CHOICES_FENCE = re.compile(
+    r"(?:^|\n)\s*```choices[ \t]*\r?\n(.*?)\r?\n```\s*\Z", re.S)
 
 
 def split_choices(text):
@@ -195,7 +195,9 @@ def split_choices(text):
     if not isinstance(choices, list) or not all(
             isinstance(c, str) and c.strip() for c in choices):
         return text, []
-    return text[:m.start()].rstrip(), [c.strip() for c in choices]
+    # A choice is one line: any whitespace inside it (an escaped newline
+    # included) collapses to a single space.
+    return text[:m.start()].rstrip(), [" ".join(c.split()) for c in choices]
 
 
 def render_choices(text):
@@ -203,7 +205,7 @@ def render_choices(text):
     on one line."""
     body, choices = split_choices(text)
     if not choices:
-        return text
+        return body
     plain = [c for c in choices if not c.startswith("/")]
     commands = [c for c in choices if c.startswith("/")]
     lines = []

@@ -131,6 +131,34 @@ class Choices(unittest.TestCase):
             'x\n\n```choices\n["/a", "/b"]\n```')
         self.assertEqual(only, "x\n\nOr send: /a · /b")
 
+    def test_trailing_whitespace_after_the_fence_still_counts(self):
+        for tail in (" ", "\n", "\n\n  \t\n", "\r\n"):
+            text, choices = gidoon_render.split_choices(
+                'x\n\n```choices\n["A"]\n```' + tail)
+            self.assertEqual((text, choices), ("x", ["A"]), repr(tail))
+
+    def test_crlf_line_endings_inside_the_fence(self):
+        text, choices = gidoon_render.split_choices(
+            'x\r\n\r\n```choices\r\n["A", "B"]\r\n```\r\n')
+        self.assertEqual(choices, ["A", "B"])
+        self.assertEqual(text, "x")
+
+    def test_an_empty_list_renders_as_nothing(self):
+        self.assertEqual(
+            gidoon_render.render_choices("x\n\n```choices\n[]\n```"), "x")
+        self.assertEqual(
+            gidoon_render.render_choices("```choices\n[]\n```"), "")
+
+    def test_a_choice_is_one_line(self):
+        text, choices = gidoon_render.split_choices(
+            'x\n```choices\n["a\\nb  c", "\\t/go\\n now"]\n```')
+        self.assertEqual(choices, ["a b c", "/go now"])
+        out = gidoon_render.render_choices(
+            'x\n```choices\n["a\\nb", "/go\\nnow"]\n```')
+        self.assertNotIn("a\nb", out)
+        self.assertIn("1. a b", out)
+        self.assertIn("Or send: /go now", out)
+
     def test_gidoon_reexports_them(self):
         self.assertIs(core.split_choices, gidoon_render.split_choices)
         self.assertIs(core.render_choices, gidoon_render.render_choices)
