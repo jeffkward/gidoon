@@ -133,6 +133,20 @@ class Tg:
     def chat_action(self, chat_id):
         return self.call("sendChatAction", chat_id=chat_id, action="typing")
 
+    def get_file(self, file_id):
+        return self.call("getFile", file_id=file_id)
+
+    def download(self, file_path, dest):
+        """Fetch a file getFile named into `dest`. Errors are TgError, so
+        the token-bearing URL never reaches a traceback."""
+        try:
+            url = f"{API_BASE}/file/bot{self._token}/{file_path}"
+            with urllib.request.urlopen(url, timeout=60) as resp, \
+                    open(dest, "wb") as f:
+                f.write(resp.read())
+        except Exception as exc:
+            raise TgError("download") from exc
+
     def set_my_commands(self, commands):
         """Register the command menu with Telegram — typing '/' in the
         chat then shows the roster natively. commands: [(cmd, desc)]."""
@@ -252,6 +266,34 @@ class TurnStatus:
                              self.running)
 
 
+_IMAGE_EXTS = {"image/jpeg": ".jpg", "image/png": ".png",
+               "image/gif": ".gif", "image/webp": ".webp",
+               "image/heic": ".heic"}
+
+
+def inbound_image(msg):
+    """(file_id, extension) for a photo, or an image sent as a file; else
+    None. A photo comes in several sizes; the largest is last."""
+    photos = msg.get("photo")
+    if isinstance(photos, list) and photos:
+        return photos[-1]["file_id"], ".jpg"
+    doc = msg.get("document")
+    if isinstance(doc, dict):
+        mime = doc.get("mime_type") or ""
+        if mime.startswith("image/"):
+            name = (doc.get("file_name") or "").lower()
+            ext = os.path.splitext(name)[1] or _IMAGE_EXTS.get(mime, ".img")
+            return doc["file_id"], ext
+    return None
+
+
+def image_prompt(path, caption):
+    caption = (caption or "").strip()
+    return (f"[The owner sent an image, saved at {path}. Look at it with "
+            f"the Read tool before you answer.]\n\n"
+            + (caption or "(No caption.)"))
+
+
 def send_long(tg, chat_id, text):
     text = core.render_choices(text or "") or "(empty reply)"
     for i in range(0, len(text), TG_MAX):
@@ -267,9 +309,22 @@ class Daemon:
         self.chat_id = chat_id
         self.face = cfg["emoji"]
         self.state = core.load_session(cfg["session_path"])
+        # Inbound images land here, one file per message, and are kept.
+        self.media_dir = os.path.expanduser(
+            f"~/.local/share/gidoon/{cfg['label']}/media")
+        self._turn_media = None
 
     def log(self, line):
         core.log_line(self.cfg["log_path"], line)
+
+    def fetch_image(self, message_id, file_id, ext):
+        """Save one inbound image; its absolute path."""
+        os.makedirs(self.media_dir, mode=0o700, exist_ok=True)
+        name = time.strftime("%Y%m%d-%H%M%S") + f"-{message_id}{ext}"
+        dest = os.path.join(self.media_dir, name)
+        info = self.tg.get_file(file_id)
+        self.tg.download(info["file_path"], dest)
+        return os.path.abspath(dest)
 
     def save_state(self):
         core.save_session(self.cfg["session_path"], self.state)
@@ -559,6 +614,10 @@ class Daemon:
         isn't that shape — FAILS CLOSED to the configured tools, because
         this hook can only ever widen a turn."""
         base = list(self.cfg["allowed_tools"])
+        # An image this turn carries is readable for this turn only. An
+        # empty list is no --allowedTools at all, which needs no grant.
+        if base and self._turn_media:
+            base.append("Read(/" + self._turn_media + ")")
         hook = self.cfg.get("allowed_tools_hook")
         if not hook:
             return base
@@ -651,12 +710,24 @@ class Daemon:
         never deleted) and a fresh ANSWER message via send_long."""
         tg, cfg, chat_id = self.tg, self.cfg, self.chat_id
         text = msg.get("text")
+        self._turn_media = None
         if text is None:
-            kind = "voice" if "voice" in msg \
-                else ("photo" if "photo" in msg else "non-text")
-            self.log(f"non-text inbound ({kind}) — declined")
-            tg.send(chat_id, f"{self.face} Text only for now")
-            return
+            image = inbound_image(msg)
+            if image is None:
+                kind = "voice" if "voice" in msg else "non-text"
+                self.log(f"non-text inbound ({kind}) — declined")
+                tg.send(chat_id, f"{self.face} Text only for now")
+                return
+            try:
+                path = self.fetch_image(msg["message_id"], *image)
+            except (TgError, OSError, KeyError) as exc:
+                self.log(f"image fetch failed ({exc})")
+                tg.send(chat_id, f"{self.face} I couldn't fetch that image "
+                                 f"— try sending it again.")
+                return
+            self.log(f"image inbound saved ({os.path.basename(path)})")
+            self._turn_media = path
+            text = image_prompt(path, msg.get("caption"))
 
         # /start is Telegram's, not the owner's: it arrives on a brand-new
         # chat, or on one that was deleted and reopened. Either way the

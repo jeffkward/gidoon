@@ -60,6 +60,18 @@ class FakeTg:
         self.menus.append(commands)
         return True
 
+    files = {}              # file_id -> bytes, served by get_file/download
+
+    def get_file(self, file_id):
+        if file_id not in self.files:
+            raise DAEMON.TgError(400)
+        return {"file_path": f"photos/{file_id}.jpg"}
+
+    def download(self, file_path, dest):
+        file_id = file_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        with open(dest, "wb") as f:
+            f.write(self.files[file_id])
+
     def get_updates(self, offset, long=True):
         self.get_updates_calls.append((offset, long))
         updates, self.pending_updates = self.pending_updates, []
