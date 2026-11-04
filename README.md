@@ -111,6 +111,7 @@ Standalone, gidoon needs none of this — it keeps its own books and answers on 
 | `post_turn_hook` | Each completed turn as JSON on stdin — prompt, reply, duration, and the runtime's own token block passed through untranslated, so the host can keep a ledger with no mapping layer to rot. |
 | `reset_hook` | Fires when context is cleared. The host's record of the conversation outlives the session, so without this it holds messages the model no longer remembers and nothing says so. |
 | `command_hooks` | The host defines its own slash commands, descriptions and all; they appear in Telegram's menu and in `/help` with no gidoon code involved. With `turn = "allow"`, a hook can hand back a prompt to run as an ordinary turn instead of replying. |
+| `media_dir` | Where inbound images are saved. gidoon never deletes them, so a host that keeps a chat record points this inside itself and ages images out with the messages they came with. |
 | `log_token_usage` | Set false when the host records turns itself, so the same turn doesn't land in two ledgers and leave one to rot. |
 
 Both hook families are fire-and-forget on purpose: they run after the answer is already sent, output is ignored, and any failure is logged and goes no further. Bookkeeping must never cost the owner a reply.

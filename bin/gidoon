@@ -309,9 +309,8 @@ class Daemon:
         self.chat_id = chat_id
         self.face = cfg["emoji"]
         self.state = core.load_session(cfg["session_path"])
-        # Inbound images land here, one file per message, and are kept.
-        self.media_dir = os.path.expanduser(
-            f"~/.local/share/gidoon/{cfg['label']}/media")
+        # Inbound images land here, one file per message (config media_dir).
+        self.media_dir = cfg["media_dir"]
         self._turn_media = None
 
     def log(self, line):

@@ -325,7 +325,7 @@ _KNOWN_KEYS = {"label", "env_file", "cwd", "permission_mode", "allowed_tools",
                "model", "emoji", "pre_turn_hook", "commands", "timeout_secs",
                "claude_bin", "system_prompt", "log_token_usage",
                "turn_lock", "post_turn_hook", "reset_hook", "command_hooks",
-               "setting_sources", "allowed_tools_hook"}
+               "setting_sources", "allowed_tools_hook", "media_dir"}
 _REQUIRED_KEYS = ("label", "env_file", "cwd")
 
 
@@ -449,6 +449,11 @@ def load_config(path, state_dir=None):
         "timeout_secs": int(raw.get("timeout_secs", DEFAULT_TIMEOUT_SECS)),
         "claude_bin": os.path.expanduser(
             raw.get("claude_bin", DEFAULT_CLAUDE_BIN)),
+        # Inbound images are saved here and never deleted by gidoon: how
+        # long they live is the host's call, the same as its chat record.
+        "media_dir": os.path.expanduser(
+            raw.get("media_dir")
+            or f"~/.local/share/gidoon/{raw['label']}/media"),
         "session_path": os.path.join(state_dir, f"{name}-session.json"),
         "usage_path": os.path.join(state_dir, f"{name}-usage.jsonl"),
         "log_path": os.path.join(state_dir, f"{name}.log"),

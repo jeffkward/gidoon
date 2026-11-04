@@ -130,6 +130,13 @@ cwd = "~/code/myproject"
 # Absent (the default) = this daemon is the only writer and takes no lock.
 #turn_lock = "~/myproject/state/.turn-lock"
 
+# Where an inbound image (a photo, or an image sent as a file) is saved,
+# one file per message, before its turn reads it. gidoon never deletes
+# them: a host that keeps a chat record usually wants its images to age out
+# with it, so point this inside the host and let it clean up. Absent = the
+# default below.
+#media_dir = "~/.local/share/gidoon/<label>/media"
+
 # Log this instance's per-turn token counts to
 # ~/.config/gidoon/<name>-usage.jsonl. ON by default: a standalone mouth is
 # the only thing keeping books. Set false when the HOST project records

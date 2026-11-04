@@ -28,6 +28,18 @@ class LoadConfig(unittest.TestCase):
         self.assertIs(cfg["log_token_usage"], True)
         self.assertEqual(cfg["timeout_secs"], 600)
         self.assertTrue(cfg["claude_bin"].endswith("/.local/bin/claude"))
+        self.assertEqual(cfg["media_dir"], os.path.expanduser(
+            "~/.local/share/gidoon/testbot/media"))
+
+    def test_media_dir_override_expanded(self):
+        cfg = helpers.write_config(self.dir, media_dir='"~/elsewhere/media"')
+        self.assertEqual(cfg["media_dir"],
+                         os.path.expanduser("~/elsewhere/media"))
+
+    def test_empty_media_dir_means_default(self):
+        cfg = helpers.write_config(self.dir, media_dir='""')
+        self.assertEqual(cfg["media_dir"], os.path.expanduser(
+            "~/.local/share/gidoon/testbot/media"))
 
     def test_derived_paths_keyed_by_config_stem(self):
         cfg = helpers.write_config(self.dir, name="mybot")

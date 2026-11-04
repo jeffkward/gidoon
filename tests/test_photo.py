@@ -21,11 +21,12 @@ class Photo(unittest.TestCase):
         self.dir = self.tmp.name
 
     def make(self, **cfg):
+        cfg.setdefault("media_dir",
+                       '"' + os.path.join(self.dir, "media") + '"')
         daemon_cfg = helpers.write_config(self.dir, **cfg)
         tg = helpers.FakeTg()
         tg.files = {"big": b"JPEGDATA", "small": b"x"}
         daemon = helpers.make_daemon(daemon_cfg, tg)
-        daemon.media_dir = os.path.join(self.dir, "media")
         return daemon, tg
 
     def run_turn(self, daemon, msg):
