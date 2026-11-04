@@ -215,3 +215,230 @@ def render_choices(text):
     if commands:
         lines.append("Or send: " + " · ".join(commands))
     return (body + "\n\n" if body else "") + "\n".join(lines)
+
+
+# ── Markdown → Telegram HTML ────────────────────────────────────────────────
+#
+# Agents write Markdown; Telegram shows it raw unless a message carries a
+# parse_mode. HTML, not MarkdownV2: HTML needs only & < > escaped, where
+# MarkdownV2 needs eighteen characters escaped everywhere except where it
+# needs different ones — one miss and the whole message is rejected.
+#
+# Best effort, never lossy: whatever can't be paired (a lone **, a fence
+# that never closes, a half-written link mid-stream) stays literal text,
+# and the output is always HTML Telegram accepts — balanced, properly
+# nested, nothing inside <pre>/<code>, no nested blockquote. The caller
+# still retries plain on a parse error, but that is the backstop, not the
+# plan.
+
+_FENCE_OPEN = re.compile(r"^\s*```([\w+#.-]*)\s*$")
+_FENCE_CLOSE = re.compile(r"^\s*```\s*$")
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+_BULLET = re.compile(r"^(\s*)[-*]\s+(?=\S)")
+_DIVIDER = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")   # ---, * * *
+_QUOTE = re.compile(r"^>\s?(.*)$")
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+
+_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(?=\S)(.+?)(?<=\S)(?<!`)\1(?!`)")
+_LINK = re.compile(r"\[([^\]\n]+)\]\(((?:https?|tg)://[^\s)]+)\)")
+_BARE_URL = re.compile(r"(?:https?|tg)://[^\s<>]+")
+_STRIKE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
+# A closing marker followed by `.word` is a file name (`__init__.py`).
+_BOLD_STAR = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*(?!\*)")
+_BOLD_UNDER = re.compile(r"(?<![\w_])__(?=\S)(.+?)(?<=\S)__(?![\w_]|\.\w)")
+_ITAL_STAR = re.compile(r"(?<![\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])")
+_ITAL_UNDER = re.compile(
+    r"(?<![\w_])_(?=[^\s_])(.+?)(?<=[^\s_])_(?![\w_]|\.\w)")
+_SLOT = re.compile("\x00(\\d+)\x00")
+
+
+def _esc(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _inline(text, bold=True):
+    """One line of Markdown → HTML. Code spans, links and bare URLs are
+    lifted out first as opaque slots, so no later rule can see inside
+    them (snake_case in a URL, *stars* in code). Each emphasis rule then
+    turns its matches into slots too, so a later rule's match can wrap a
+    finished tag but never cut through one — that is what keeps crossed
+    markers (`**a *b** c*`) from producing mis-nested HTML. bold=False
+    (inside a heading, already bold) unwraps bold markers instead."""
+    slots = []
+
+    def slot(html_):
+        slots.append(html_)
+        return f"\x00{len(slots) - 1}\x00"
+
+    text = text.replace("\x00", "")
+    text = _CODE_SPAN.sub(lambda m: slot(f"<code>{_esc(m.group(2))}</code>"),
+                          text)
+
+    def link(m):
+        href = _esc(m.group(2)).replace('"', "&quot;")
+        return slot(f'<a href="{href}">{_esc(m.group(1))}</a>')
+    text = _LINK.sub(link, text)
+    text = _BARE_URL.sub(lambda m: slot(_esc(m.group(0))), text)
+    text = _esc(text)
+
+    b = "b" if bold else None
+    rules = ((_BOLD_STAR, b), (_BOLD_UNDER, b), (_STRIKE, "s"),
+             (_ITAL_STAR, "i"), (_ITAL_UNDER, "i"))
+
+    def emphasis(text, rules):
+        # A match's inside gets the rules AFTER this one — bold may hold
+        # italic, never the reverse — and then becomes one opaque slot.
+        for k, (pat, tag) in enumerate(rules):
+            def wrap(m, tag=tag, rest=rules[k + 1:]):
+                inner = emphasis(m.group(1), rest)
+                return slot(f"<{tag}>{inner}</{tag}>" if tag else inner)
+            text = pat.sub(wrap, text)
+        return text
+    text = emphasis(text, rules)
+
+    while _SLOT.search(text):
+        text = _SLOT.sub(lambda m: slots[int(m.group(1))], text)
+    return text
+
+
+def to_telegram_html(text):
+    """Markdown → Telegram HTML (parse_mode=HTML). Pure, best effort."""
+    lines = (text or "").split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        fence = _FENCE_OPEN.match(line)
+        if fence:
+            end = next((j for j in range(i + 1, len(lines))
+                        if _FENCE_CLOSE.match(lines[j])), None)
+            if end is not None:
+                body = _esc("\n".join(lines[i + 1:end]))
+                lang = fence.group(1)
+                out.append(f'<pre><code class="language-{lang}">{body}'
+                           f"</code></pre>" if lang else f"<pre>{body}</pre>")
+                i = end + 1
+                continue
+            out.append(_inline(line))     # a fence that never closes: text
+            i += 1
+            continue
+        if _TABLE_ROW.match(line):
+            j = i
+            while j < len(lines) and _TABLE_ROW.match(lines[j]):
+                j += 1
+            if j - i >= 2:
+                out.append("<pre>" + _esc("\n".join(lines[i:j])) + "</pre>")
+                i = j
+                continue
+        if _QUOTE.match(line):
+            j = i
+            while j < len(lines) and _QUOTE.match(lines[j]):
+                j += 1
+            body = [_QUOTE.match(l).group(1) for l in lines[i:j]]
+            if any(b.strip() for b in body):
+                out.append("<blockquote>"
+                           + "\n".join(_inline(b) for b in body)
+                           + "</blockquote>")
+            else:
+                out.extend(_esc(l) for l in lines[i:j])
+            i = j
+            continue
+        heading = _HEADING.match(line)
+        if heading:
+            out.append(f"<b>{_inline(heading.group(1), bold=False)}</b>")
+        elif _DIVIDER.match(line):
+            out.append(_esc(line))
+        else:
+            out.append(_inline(_BULLET.sub(r"\1• ", line)))
+        i += 1
+    return "\n".join(out)
+
+
+def _md_blocks(text):
+    """Paragraphs (split on blank lines), with each closed fenced block
+    kept whole even when it holds blank lines."""
+    lines, blocks, cur, i = text.split("\n"), [], [], 0
+    while i < len(lines):
+        line = lines[i]
+        if _FENCE_OPEN.match(line):
+            end = next((j for j in range(i + 1, len(lines))
+                        if _FENCE_CLOSE.match(lines[j])), None)
+            if end is not None:
+                if cur:
+                    blocks.append("\n".join(cur))
+                    cur = []
+                blocks.append("\n".join(lines[i:end + 1]))
+                i = end + 1
+                continue
+        if line.strip():
+            cur.append(line)
+        elif cur:
+            blocks.append("\n".join(cur))
+            cur = []
+        i += 1
+    if cur:
+        blocks.append("\n".join(cur))
+    return blocks
+
+
+def split_markdown(text, limit=4096):
+    """Markdown → parts that each fit `limit` both as Markdown AND once
+    rendered (escaping grows text: & is five characters in HTML). Splits
+    between paragraphs; never inside a fenced block — one too long to send
+    whole is cut between lines and each piece re-fenced; a single line too
+    long for any part is hard-cut, at a space when there is one."""
+    def fits(s):
+        return len(s) <= limit and len(to_telegram_html(s)) <= limit
+
+    def hard_cut(line, prefix="", suffix=""):
+        pieces = []
+        while line:
+            n = min(len(line), limit)
+            while n > 1 and not fits(prefix + line[:n] + suffix):
+                n = max(1, n * 3 // 4)
+            space = line.rfind(" ", 0, n)
+            if n < len(line) and space > n // 2:
+                n = space + 1
+            pieces.append(prefix + line[:n] + suffix)
+            line = line[n:]
+        return pieces
+
+    def pack(lines, prefix="", suffix=""):
+        pieces, cur = [], None
+        for line in lines:
+            cand = line if cur is None else cur + "\n" + line
+            if fits(prefix + cand + suffix):
+                cur = cand
+                continue
+            if cur is not None:
+                pieces.append(prefix + cur + suffix)
+            if fits(prefix + line + suffix):
+                cur = line
+            else:
+                pieces.extend(hard_cut(line, prefix, suffix))
+                cur = None
+        if cur is not None:
+            pieces.append(prefix + cur + suffix)
+        return pieces
+
+    parts, cur = [], None
+    for block in _md_blocks(text or ""):
+        cand = block if cur is None else cur + "\n\n" + block
+        if fits(cand):
+            cur = cand
+            continue
+        if cur is not None:
+            parts.append(cur)
+            cur = None
+        if fits(block):
+            cur = block
+            continue
+        blines = block.split("\n")
+        if _FENCE_OPEN.match(blines[0]) and len(blines) >= 2 \
+                and _FENCE_CLOSE.match(blines[-1]):
+            parts.extend(pack(blines[1:-1], blines[0].strip() + "\n",
+                              "\n```"))
+        else:
+            parts.extend(pack(blines))
+    if cur is not None:
+        parts.append(cur)
+    return parts or [""]

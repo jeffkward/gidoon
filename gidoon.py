@@ -540,6 +540,8 @@ from gidoon_render import (  # noqa: F401  (re-exported)
     CHOICES_FENCE,
     split_choices,
     render_choices,
+    to_telegram_html,
+    split_markdown,
 )
 
 

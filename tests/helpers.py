@@ -31,7 +31,9 @@ class FakeTg:
 
     def __init__(self, pending_updates=None):
         self.sent = []          # (chat_id, text)
+        self.sent_fmt = []      # the fmt flag of each send, in order
         self.edits = []         # (chat_id, message_id, text)
+        self.edit_fmt = []      # the fmt flag of each edit, in order
         self.reactions = []     # (chat_id, message_id, emoji)
         self.actions = []       # chat_id
         self.menus = []         # commands payloads
@@ -39,13 +41,15 @@ class FakeTg:
         self.pending_updates = list(pending_updates or [])
         self._msg_id = 100
 
-    def send(self, chat_id, text):
+    def send(self, chat_id, text, fmt=True):
         self._msg_id += 1
         self.sent.append((chat_id, text))
+        self.sent_fmt.append(fmt)
         return {"message_id": self._msg_id}
 
-    def edit(self, chat_id, message_id, text):
+    def edit(self, chat_id, message_id, text, fmt=True):
         self.edits.append((chat_id, message_id, text))
+        self.edit_fmt.append(fmt)
         return {}
 
     def react(self, chat_id, message_id, emoji="👀"):

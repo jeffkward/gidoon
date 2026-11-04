@@ -68,10 +68,17 @@ Install an instance with install.sh; instances live in ~/.config/gidoon."""
 class TgError(Exception):
     def __init__(self, code, description=""):
         self.code = code
+        # Telegram's own words ("Bad Request: can't parse entities…") —
+        # never the message text, so it is safe to inspect and log.
+        self.description = description or ""
         super().__init__(f"telegram api error {code}")
 
 
 class Tg:
+    # Where a formatting fallback is reported (a callable taking one line),
+    # or None. The daemon points it at its log; `gidoon send` at stderr.
+    log = None
+
     def __init__(self, token):
         self._token = token
 
@@ -96,7 +103,8 @@ class Tg:
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 raise TgError("network") from exc
             if not payload.get("ok"):
-                raise TgError(payload.get("error_code", "unknown"))
+                raise TgError(payload.get("error_code", "unknown"),
+                              str(payload.get("description") or ""))
             return payload["result"]
         except TgError:
             raise
@@ -117,12 +125,32 @@ class Tg:
         return self.call("getUpdates", http_timeout=15, offset=offset,
                          timeout=0, allowed_updates=json.dumps(["message"]))
 
-    def send(self, chat_id, text):
-        return self.call("sendMessage", chat_id=chat_id, text=text)
+    def send(self, chat_id, text, fmt=True):
+        return self._formatted("sendMessage", text, fmt, chat_id=chat_id)
 
-    def edit(self, chat_id, message_id, text):
-        return self.call("editMessageText", chat_id=chat_id,
-                         message_id=message_id, text=text)
+    def edit(self, chat_id, message_id, text, fmt=True):
+        return self._formatted("editMessageText", text, fmt,
+                               chat_id=chat_id, message_id=message_id)
+
+    def _formatted(self, method, text, fmt, **params):
+        """Markdown → Telegram HTML, sent with parse_mode=HTML. If Telegram
+        still can't parse it, the same call goes again ONCE with the
+        original text and no parse_mode: formatting is best effort, a
+        message is never lost to it. Only that error is retried — any
+        other failure is the caller's, exactly as before."""
+        if not fmt:
+            return self.call(method, text=text, **params)
+        try:
+            return self.call(method, text=core.to_telegram_html(text),
+                             parse_mode="HTML", **params)
+        except TgError as exc:
+            if exc.code != 400 or \
+                    "can't parse entities" not in exc.description.lower():
+                raise
+        if self.log:
+            self.log(f"{method}: telegram rejected the formatting "
+                     f"({len(text)} chars) — sent plain")
+        return self.call(method, text=text, **params)
 
     def react(self, chat_id, message_id, emoji=ACK_REACTION):
         return self.call("setMessageReaction", chat_id=chat_id,
@@ -295,9 +323,13 @@ def image_prompt(path, caption):
 
 
 def send_long(tg, chat_id, text):
+    """Split the Markdown first (between paragraphs, never mid-fence),
+    then let each part be rendered on its way out — every part fits
+    TG_MAX both as Markdown and as the HTML it becomes, so neither the
+    formatted send nor its plain fallback can overflow."""
     text = core.render_choices(text or "") or "(empty reply)"
-    for i in range(0, len(text), TG_MAX):
-        tg.send(chat_id, text[i:i + TG_MAX])
+    for part in core.split_markdown(text, TG_MAX):
+        tg.send(chat_id, part)
 
 
 class Daemon:
@@ -312,6 +344,8 @@ class Daemon:
         # Inbound images land here, one file per message (config media_dir).
         self.media_dir = cfg["media_dir"]
         self._turn_media = None
+        if hasattr(tg, "log") and tg.log is None:
+            tg.log = self.log
 
     def log(self, line):
         core.log_line(self.cfg["log_path"], line)
@@ -784,7 +818,11 @@ class Daemon:
             pass
         turn = TurnStatus(self.face)
         initial_text = turn.render()  # "<face>💭"
-        status = tg.send(chat_id, initial_text)
+        # The status message is gidoon's own tool checklist (file names,
+        # globs, commands), not Markdown, so it goes out plain — formatting
+        # it would italicise a `*.py` glob or a `__init__` path. The reply
+        # is a separate message, rendered in full by send_long.
+        status = tg.send(chat_id, initial_text, fmt=False)
         status_id = status["message_id"]
         draft = {"last_edit": 0.0, "last_sent": initial_text}
 
@@ -798,7 +836,7 @@ class Daemon:
             if shown == draft["last_sent"]:
                 return
             try:
-                tg.edit(chat_id, status_id, shown)
+                tg.edit(chat_id, status_id, shown, fmt=False)
                 draft["last_sent"] = shown
             except TgError:
                 pass  # edit races/rate limits are cosmetic; the answer send is what matters
@@ -1003,8 +1041,10 @@ def send_main(argv):
     text = text.rstrip("\n")
     if not text.strip():
         sys.exit("gidoon send: empty message")
+    tg = Tg(token)
+    tg.log = lambda line: print(f"gidoon send: {line}", file=sys.stderr)
     try:
-        send_long(Tg(token), chat_id, text)
+        send_long(tg, chat_id, text)
     except TgError as exc:
         sys.exit(f"gidoon send: telegram error ({exc.code})")
 

@@ -34,6 +34,7 @@ EXPORTS = (
     "collapse_tool_runs", "count_suffix", "collapse_tool_lines",
     "extract_text", "extract_tools",
     "CHOICES_FENCE", "split_choices", "render_choices",
+    "to_telegram_html", "split_markdown",
 )
 
 

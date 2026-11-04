@@ -33,6 +33,7 @@ Want to run multiple gidoon instances in more than one project? Run the installe
 - Every turn is `claude -p` resuming one persistent session in the project directory, so the bot speaks *as* the project.
 - A built-in system prompt tells each turn what's happening (the person is on Telegram, this isn't an interactive terminal session or the project's scheduler).
 - Permission posture, model, and tool allowlist are enforced via a per-instance config (TOML).
+- Markdown in every message (replies, hook output, `gidoon send`) is shown as Telegram formatting: bold, italic, code, fenced blocks, links, quotes, headings, bullets, and tables in a monospace block. It's best effort: anything that can't be paired stays as text, and if Telegram still rejects the formatting the same message goes again as plain text, so nothing is lost. The live status line stays plain.
 
 ## Structure
 
