@@ -219,12 +219,14 @@ class SendLong(unittest.TestCase):
         D.send_long(tg, 42, "")
         self.assertEqual(tg.sent, [(42, "(empty reply)")])
 
-    def test_a_choices_block_is_sent_rendered(self):
+    def test_a_choices_block_is_sent_as_buttons(self):
         tg = helpers.FakeTg()
         D.send_long(tg, 42, 'Pick.\n\n```choices\n["A", "/go"]\n```')
-        self.assertEqual(tg.sent, [(42, "Pick.\n\n1. A\n"
-                                    "Reply with a number, or in your own "
-                                    "words.\nOr send: /go")])
+        self.assertEqual(tg.sent, [(42, "Pick.\n\n"
+                                    "_Tap one, or reply in your own words._"
+                                    "\nOr send: /go")])
+        self.assertEqual(tg.sent_markup,
+                         [[[{"text": "A", "callback_data": "c:A"}]]])
 
 
 class RenderStatus(unittest.TestCase):

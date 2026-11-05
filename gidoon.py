@@ -542,6 +542,9 @@ from gidoon_render import (  # noqa: F401  (re-exported)
     render_choices,
     to_telegram_html,
     split_markdown,
+    button_label,
+    telegram_choices,
+    choice_from_callback,
 )
 
 

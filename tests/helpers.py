@@ -32,6 +32,9 @@ class FakeTg:
     def __init__(self, pending_updates=None):
         self.sent = []          # (chat_id, text)
         self.sent_fmt = []      # the fmt flag of each send, in order
+        self.sent_markup = []   # the inline keyboard of each send, or None
+        self.callback_answers = []    # callback_query ids answered
+        self.markup_edits = []  # (chat_id, message_id, keyboard)
         self.edits = []         # (chat_id, message_id, text)
         self.edit_fmt = []      # the fmt flag of each edit, in order
         self.reactions = []     # (chat_id, message_id, emoji)
@@ -41,11 +44,20 @@ class FakeTg:
         self.pending_updates = list(pending_updates or [])
         self._msg_id = 100
 
-    def send(self, chat_id, text, fmt=True):
+    def send(self, chat_id, text, fmt=True, markup=None):
         self._msg_id += 1
         self.sent.append((chat_id, text))
         self.sent_fmt.append(fmt)
+        self.sent_markup.append(markup)
         return {"message_id": self._msg_id}
+
+    def answer_callback(self, callback_id):
+        self.callback_answers.append(callback_id)
+        return True
+
+    def edit_markup(self, chat_id, message_id, markup):
+        self.markup_edits.append((chat_id, message_id, markup))
+        return {}
 
     def edit(self, chat_id, message_id, text, fmt=True):
         self.edits.append((chat_id, message_id, text))

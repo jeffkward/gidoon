@@ -217,6 +217,106 @@ def render_choices(text):
     return (body + "\n\n" if body else "") + "\n".join(lines)
 
 
+# ── Buttons ─────────────────────────────────────────────────────────────────
+#
+# On Telegram a choices block becomes inline buttons, one per row. A
+# button's text goes through button_label — the one place a button's text
+# is styled, so every button in a host looks alike. The tap brings back the
+# option's OWN words (not the styled label), so a host matching replies
+# against the options it offered sees exactly what a typed reply would be.
+
+# Mid-label words that stay lowercase. Not on/off/up/in/out: on a button
+# they are nearly always a verb's particle ("Turn On", "Log In").
+_SMALL_WORDS = {"a", "an", "the", "or", "nor", "but", "of", "to", "for",
+                "by", "at", "as", "via", "vs"}
+
+TAP_LINE = "_Tap one, or reply in your own words._"
+
+# A phone shows about this many characters on a one-per-row button before
+# cutting it with "…" — past it, the options are listed in full as well.
+BUTTON_FULL_TEXT = 40
+
+# Telegram's own limit on a button's callback_data, in bytes.
+CALLBACK_MAX = 64
+
+
+def _cap(word):
+    """Capitalise a word's first letter — unless it carries capitals of its
+    own (URL, iPhone), a digit (v2), or doesn't start with a letter (/clear,
+    ~/path): those are already exactly what someone meant."""
+    if not word[:1].isalpha() or any(ch.isdigit() for ch in word) \
+            or any(ch.isupper() for ch in word[1:]):
+        return word
+    return "-".join(p[:1].upper() + p[1:] for p in word.split("-"))
+
+
+def button_label(text):
+    """A button's text, mostly title case: every word capitalised except
+    small words mid-label, and a standalone "and" as "&"
+    ("Save and send" → "Save & Send")."""
+    words = (text or "").split()
+    last = len(words) - 1
+    out = []
+    for i, word in enumerate(words):
+        bare = word.lower().strip(",.;:!?")
+        middle = 0 < i < last
+        if middle and word.lower() == "and":
+            out.append("&")
+        elif middle and bare in _SMALL_WORDS and \
+                not any(ch.isupper() for ch in word[1:]):
+            out.append(word.lower())
+        else:
+            out.append(_cap(word))
+    return " ".join(out)
+
+
+def _callback_data(choice, index):
+    data = "c:" + choice
+    return data if len(data.encode()) <= CALLBACK_MAX else f"i:{index}"
+
+
+def telegram_choices(text):
+    """(the text to send, the inline keyboard or None). Plain options become
+    buttons; commands stay a line of text (a command is something to send,
+    not an answer)."""
+    body, choices = split_choices(text)
+    if not choices:
+        return body, None
+    plain = [c for c in choices if not c.startswith("/")]
+    commands = [c for c in choices if c.startswith("/")]
+    lines, keyboard = [], None
+    if plain:
+        keyboard = [[{"text": button_label(c),
+                      "callback_data": _callback_data(c, i)}]
+                    for i, c in enumerate(plain)]
+        if any(len(button_label(c)) > BUTTON_FULL_TEXT for c in plain):
+            lines += [f"- {c}" for c in plain]
+        lines.append(TAP_LINE)
+    if commands:
+        lines.append("Or send: " + " · ".join(commands))
+    return (body + "\n\n" if body else "") + "\n".join(lines), keyboard
+
+
+def choice_from_callback(data, message):
+    """The words a tapped button answers with, or None for a tap that isn't
+    one of ours. `c:<words>` carries them whole; `i:<n>` (options too long
+    for callback_data) falls back to that button's text on the message."""
+    if not isinstance(data, str):
+        return None
+    if data.startswith("c:"):
+        return data[2:] or None
+    if data.startswith("i:"):
+        try:
+            n = int(data[2:])
+        except ValueError:
+            return None
+        rows = ((message or {}).get("reply_markup") or {}) \
+            .get("inline_keyboard") or []
+        if 0 <= n < len(rows) and rows[n]:
+            return rows[n][0].get("text") or None
+    return None
+
+
 # ── Markdown → Telegram HTML ────────────────────────────────────────────────
 #
 # Agents write Markdown; Telegram shows it raw unless a message carries a

@@ -35,6 +35,7 @@ EXPORTS = (
     "extract_text", "extract_tools",
     "CHOICES_FENCE", "split_choices", "render_choices",
     "to_telegram_html", "split_markdown",
+    "button_label", "telegram_choices", "choice_from_callback",
 )
 
 

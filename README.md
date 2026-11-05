@@ -34,6 +34,7 @@ Want to run multiple gidoon instances in more than one project? Run the installe
 - A built-in system prompt tells each turn what's happening (the person is on Telegram, this isn't an interactive terminal session or the project's scheduler).
 - Permission posture, model, and tool allowlist are enforced via a per-instance config (TOML).
 - Markdown in every message (replies, hook output, `gidoon send`) is shown as Telegram formatting: bold, italic, code, fenced blocks, links, quotes, headings, bullets, and tables in a monospace block. It's best effort: anything that can't be paired stays as text, and if Telegram still rejects the formatting the same message goes again as plain text, so nothing is lost. The live status line stays plain.
+- A message that ends in a ```` ```choices ```` block (a JSON list of strings) shows its options as tappable buttons, one per row, with button text in title case (`Save and send` → `Save & Send`). Tapping one marks the message with ✓ and the choice, then runs a turn with the option's own words, exactly as if they'd been typed. Typing a reply still works. Options starting with `/` stay a line of text (`Or send: /clear`), not buttons.
 
 ## Structure
 

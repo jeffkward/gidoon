@@ -118,15 +118,30 @@ class Tg:
         # http_timeout controls urlopen(); the plain "timeout" kwarg below
         # flows through **params into the request body as Telegram's own
         # long-poll parameter. long=False is the immediate (drain) form.
+        # callback_query: a tapped button (see Daemon.handle_tap).
+        kinds = json.dumps(["message", "callback_query"])
         if long:
             return self.call("getUpdates", http_timeout=60, offset=offset,
-                             timeout=50,
-                             allowed_updates=json.dumps(["message"]))
+                             timeout=50, allowed_updates=kinds)
         return self.call("getUpdates", http_timeout=15, offset=offset,
-                         timeout=0, allowed_updates=json.dumps(["message"]))
+                         timeout=0, allowed_updates=kinds)
 
-    def send(self, chat_id, text, fmt=True):
-        return self._formatted("sendMessage", text, fmt, chat_id=chat_id)
+    def send(self, chat_id, text, fmt=True, markup=None):
+        params = {"chat_id": chat_id}
+        if markup:
+            params["reply_markup"] = json.dumps({"inline_keyboard": markup})
+        return self._formatted("sendMessage", text, fmt, **params)
+
+    def answer_callback(self, callback_id):
+        """Stops the spinner on the tapped button. Telegram wants one for
+        every tap, ours or not."""
+        return self.call("answerCallbackQuery",
+                         callback_query_id=callback_id)
+
+    def edit_markup(self, chat_id, message_id, markup):
+        return self.call("editMessageReplyMarkup", chat_id=chat_id,
+                         message_id=message_id,
+                         reply_markup=json.dumps({"inline_keyboard": markup}))
 
     def edit(self, chat_id, message_id, text, fmt=True):
         return self._formatted("editMessageText", text, fmt,
@@ -327,9 +342,12 @@ def send_long(tg, chat_id, text):
     then let each part be rendered on its way out — every part fits
     TG_MAX both as Markdown and as the HTML it becomes, so neither the
     formatted send nor its plain fallback can overflow."""
-    text = core.render_choices(text or "") or "(empty reply)"
-    for part in core.split_markdown(text, TG_MAX):
-        tg.send(chat_id, part)
+    text, keyboard = core.telegram_choices(text or "")
+    parts = core.split_markdown(text or "(empty reply)", TG_MAX)
+    for i, part in enumerate(parts):
+        # The buttons ride on the last part: under the question they answer.
+        tg.send(chat_id, part,
+                markup=keyboard if i == len(parts) - 1 else None)
 
 
 class Daemon:
@@ -344,6 +362,9 @@ class Daemon:
         # Inbound images land here, one file per message (config media_dir).
         self.media_dir = cfg["media_dir"]
         self._turn_media = None
+        # Messages whose buttons were already tapped this run: a double tap
+        # lands twice before the ✓ edit reaches the phone.
+        self._tapped = set()
         if hasattr(tg, "log") and tg.log is None:
             tg.log = self.log
 
@@ -802,10 +823,13 @@ class Daemon:
 
         # Cheap ack so the phone shows life within seconds, even before
         # the status message lands. Cosmetic — never let it block a turn.
-        try:
-            tg.react(chat_id, msg["message_id"])
-        except (TgError, KeyError):
-            pass
+        # Not on a tap: the message it came from is the bot's own, and the
+        # ✓ on it is the ack.
+        if not msg.get("tapped"):
+            try:
+                tg.react(chat_id, msg["message_id"])
+            except (TgError, KeyError):
+                pass
 
         declined = self.pre_turn_decline(text)
         if declined is not None:
@@ -978,6 +1002,9 @@ class Daemon:
         """Allowlist filter + poison-message guard around one update. The
         offset advances no matter what, so one bad message can never wedge
         the loop."""
+        tap = update.get("callback_query")
+        if tap:
+            self.handle_tap(tap)
         msg = update.get("message")
         if msg:
             if msg.get("chat", {}).get("id") != self.chat_id:
@@ -995,6 +1022,39 @@ class Daemon:
                         pass
         self.state["offset"] = update["update_id"] + 1
         self.save_state()
+
+    def handle_tap(self, tap):
+        """A tapped choice button. The spinner is always answered; a tap
+        from the owner's chat on one of our buttons marks the message with
+        what was picked (the buttons go, so it can't be picked twice) and
+        runs as a turn with the option's own words — the same text a typed
+        reply would be, so a host matching against its options needs
+        nothing new. Never raises: it runs inside the poll loop."""
+        try:
+            self.tg.answer_callback(tap["id"])
+        except (TgError, KeyError):
+            pass
+        message = tap.get("message") or {}
+        if message.get("chat", {}).get("id") != self.chat_id:
+            self.log("ignored tap from non-allowlisted chat")
+            return
+        words = core.choice_from_callback(tap.get("data"), message)
+        key = message.get("message_id")
+        if words is None or key in self._tapped:
+            return
+        self._tapped.add(key)
+        try:
+            self.tg.edit_markup(self.chat_id, key, [[{
+                "text": "✓ " + core.button_label(words),
+                "callback_data": "done"}]])
+        except TgError as exc:
+            self.log(f"tap: marking the choice failed ({exc.code})")
+        try:
+            self.handle_message({"message_id": key, "text": words,
+                                 "chat": {"id": self.chat_id},
+                                 "tapped": True})
+        except Exception as exc:  # poison-message guard, as for messages
+            self.log(f"handler error: {type(exc).__name__}")
 
 
 def _load_instance(config_path, prog="gidoon"):

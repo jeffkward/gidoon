@@ -138,10 +138,15 @@ class SendLong(unittest.TestCase):
         fake = helpers.FakeTg()
         D.send_long(fake, 42, 'Pick:\n```choices\n["old_name", "/clear"]\n```')
         (_, text), = fake.sent
-        self.assertEqual(text, "Pick:\n\n1. old_name\n"
-                               "Reply with a number, or in your own words.\n"
+        self.assertEqual(text, "Pick:\n\n"
+                               "_Tap one, or reply in your own words._\n"
                                "Or send: /clear")
-        self.assertEqual(D.core.to_telegram_html(text), text)
+        self.assertEqual(D.core.to_telegram_html(text),
+                         "Pick:\n\n<i>Tap one, or reply in your own words."
+                         "</i>\nOr send: /clear")
+        # the snake_case option rides on its button untouched
+        self.assertEqual(fake.sent_markup[0][0][0]["callback_data"],
+                         "c:old_name")
 
 
 class StatusMessageStaysPlain(unittest.TestCase):
