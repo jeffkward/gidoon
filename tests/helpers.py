@@ -33,6 +33,8 @@ class FakeTg:
         self.sent = []          # (chat_id, text)
         self.sent_fmt = []      # the fmt flag of each send, in order
         self.sent_markup = []   # the inline keyboard of each send, or None
+        self.sent_silent = []   # the silent flag of each send, in order
+        self.link_previews = False
         self.callback_answers = []    # callback_query ids answered
         self.markup_edits = []  # (chat_id, message_id, keyboard)
         self.edits = []         # (chat_id, message_id, text)
@@ -44,8 +46,9 @@ class FakeTg:
         self.pending_updates = list(pending_updates or [])
         self._msg_id = 100
 
-    def send(self, chat_id, text, fmt=True, markup=None):
+    def send(self, chat_id, text, fmt=True, markup=None, silent=False):
         self._msg_id += 1
+        self.sent_silent.append(silent)
         self.sent.append((chat_id, text))
         self.sent_fmt.append(fmt)
         self.sent_markup.append(markup)

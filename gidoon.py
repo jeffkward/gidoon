@@ -325,7 +325,8 @@ _KNOWN_KEYS = {"label", "env_file", "cwd", "permission_mode", "allowed_tools",
                "model", "emoji", "pre_turn_hook", "commands", "timeout_secs",
                "claude_bin", "system_prompt", "log_token_usage",
                "turn_lock", "post_turn_hook", "reset_hook", "command_hooks",
-               "setting_sources", "allowed_tools_hook", "media_dir"}
+               "setting_sources", "allowed_tools_hook", "media_dir",
+               "link_previews"}
 _REQUIRED_KEYS = ("label", "env_file", "cwd")
 
 
@@ -409,6 +410,9 @@ def load_config(path, state_dir=None):
     if not isinstance(allowed_tools, list) or \
             not all(isinstance(t, str) for t in allowed_tools):
         raise ConfigError("allowed_tools must be a list of strings")
+    previews = raw.get("link_previews", False)
+    if not isinstance(previews, bool):
+        raise ConfigError("link_previews must be true or false")
     log_usage = raw.get("log_token_usage", True)
     if not isinstance(log_usage, bool):
         raise ConfigError("log_token_usage must be true or false")
@@ -444,6 +448,9 @@ def load_config(path, state_dir=None):
         "system_prompt": raw.get("system_prompt") or DEFAULT_SYSTEM_PROMPT,
         "commands": commands,
         "log_token_usage": log_usage,
+        # A URL in a message expands into a preview card unless told not
+        # to; off by default, so a link reads as a link.
+        "link_previews": previews,
         "turn_lock": (os.path.expanduser(raw["turn_lock"])
                       if raw.get("turn_lock") else None),
         "timeout_secs": int(raw.get("timeout_secs", DEFAULT_TIMEOUT_SECS)),

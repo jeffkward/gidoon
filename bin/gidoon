@@ -126,10 +126,21 @@ class Tg:
         return self.call("getUpdates", http_timeout=15, offset=offset,
                          timeout=0, allowed_updates=kinds)
 
-    def send(self, chat_id, text, fmt=True, markup=None):
-        params = {"chat_id": chat_id}
+    # Off unless an instance sets `link_previews = true`: a URL in a
+    # message otherwise expands into a preview card under it.
+    link_previews = False
+
+    def _preview(self, params):
+        if not self.link_previews:
+            params["link_preview_options"] = json.dumps({"is_disabled": True})
+        return params
+
+    def send(self, chat_id, text, fmt=True, markup=None, silent=False):
+        params = self._preview({"chat_id": chat_id})
         if markup:
             params["reply_markup"] = json.dumps({"inline_keyboard": markup})
+        if silent:
+            params["disable_notification"] = "true"   # arrives without a buzz
         return self._formatted("sendMessage", text, fmt, **params)
 
     def answer_callback(self, callback_id):
@@ -145,7 +156,8 @@ class Tg:
 
     def edit(self, chat_id, message_id, text, fmt=True):
         return self._formatted("editMessageText", text, fmt,
-                               chat_id=chat_id, message_id=message_id)
+                               **self._preview({"chat_id": chat_id,
+                                                "message_id": message_id}))
 
     def _formatted(self, method, text, fmt, **params):
         """Markdown → Telegram HTML, sent with parse_mode=HTML. If Telegram
@@ -337,7 +349,7 @@ def image_prompt(path, caption):
             + (caption or "(No caption.)"))
 
 
-def send_long(tg, chat_id, text):
+def send_long(tg, chat_id, text, silent=False):
     """Split the Markdown first (between paragraphs, never mid-fence),
     then let each part be rendered on its way out — every part fits
     TG_MAX both as Markdown and as the HTML it becomes, so neither the
@@ -347,7 +359,8 @@ def send_long(tg, chat_id, text):
     for i, part in enumerate(parts):
         # The buttons ride on the last part: under the question they answer.
         tg.send(chat_id, part,
-                markup=keyboard if i == len(parts) - 1 else None)
+                markup=keyboard if i == len(parts) - 1 else None,
+                silent=silent)
 
 
 class Daemon:
@@ -1094,17 +1107,20 @@ def send_main(argv):
                              "or a path to an instance TOML")
     parser.add_argument("message", nargs="?",
                         help="text to send; omitted → read from stdin")
+    parser.add_argument("--silent", action="store_true",
+                        help="deliver without a notification sound")
     args = parser.parse_args(argv)
-    _, token, chat_id = _load_instance(
+    cfg, token, chat_id = _load_instance(
         core.resolve_instance_config(args.instance), prog="gidoon send")
     text = args.message if args.message is not None else sys.stdin.read()
     text = text.rstrip("\n")
     if not text.strip():
         sys.exit("gidoon send: empty message")
     tg = Tg(token)
+    tg.link_previews = cfg.get("link_previews", False)
     tg.log = lambda line: print(f"gidoon send: {line}", file=sys.stderr)
     try:
-        send_long(tg, chat_id, text)
+        send_long(tg, chat_id, text, silent=args.silent)
     except TgError as exc:
         sys.exit(f"gidoon send: telegram error ({exc.code})")
 
@@ -1273,7 +1289,9 @@ def main(argv=None):
     if not os.path.isdir(cfg["cwd"]):
         sys.exit(f"gidoon: project cwd missing: {cfg['cwd']}")
 
-    Daemon(Tg(token), cfg, chat_id).run()
+    tg = Tg(token)
+    tg.link_previews = cfg.get("link_previews", False)
+    Daemon(tg, cfg, chat_id).run()
 
 
 if __name__ == "__main__":

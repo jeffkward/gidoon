@@ -137,6 +137,10 @@ cwd = "~/code/myproject"
 # default below.
 #media_dir = "~/.local/share/gidoon/<label>/media"
 
+# A URL in a message normally expands into a preview card under it.
+# Off by default so a link reads as a link; true keeps the previews.
+#link_previews = false
+
 # Log this instance's per-turn token counts to
 # ~/.config/gidoon/<name>-usage.jsonl. ON by default: a standalone mouth is
 # the only thing keeping books. Set false when the HOST project records

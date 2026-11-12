@@ -335,6 +335,8 @@ _FENCE_OPEN = re.compile(r"^\s*```([\w+#.-]*)\s*$")
 _FENCE_CLOSE = re.compile(r"^\s*```\s*$")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
 _BULLET = re.compile(r"^(\s*)[-*]\s+(?=\S)")
+_TASK = re.compile(r"^(\s*)[-*]\s+\[([ xX])\]\s+")
+DIVIDER_LINE = "──────────"
 _DIVIDER = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")   # ---, * * *
 _QUOTE = re.compile(r"^>\s?(.*)$")
 # `>+` lines: an expandable quote — Telegram shows its first lines and
@@ -463,7 +465,11 @@ def to_telegram_html(text):
         if heading:
             out.append(f"<b>{_inline(heading.group(1), bold=False)}</b>")
         elif _DIVIDER.match(line):
-            out.append(_esc(line))
+            out.append(DIVIDER_LINE)
+        elif _TASK.match(line):
+            out.append(_inline(_TASK.sub(
+                lambda m: m.group(1) + ("☐ " if m.group(2) == " " else "☑️ "),
+                line)))
         else:
             out.append(_inline(_BULLET.sub(r"\1• ", line)))
         i += 1

@@ -214,7 +214,8 @@ class Blocks(Base):
                   "• one\n• two\n  • nested")
 
     def test_a_divider_is_not_a_bullet(self):
-        self.conv("* * *\n- - -\n---", "* * *\n- - -\n---")
+        line = r.DIVIDER_LINE
+        self.conv("* * *\n- - -\n---", f"{line}\n{line}\n{line}")
 
     def test_numbered_lists_unchanged(self):
         self.conv("1. one\n2. two", "1. one\n2. two")
