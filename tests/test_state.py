@@ -29,6 +29,21 @@ class Session(unittest.TestCase):
         self.assertEqual(core.load_session(self.path),
                          {"offset": 0, "session_id": None})
 
+    def test_a_file_written_by_a_host_without_an_offset_gets_one(self):
+        # A host may write the session file before the bot's first run
+        # (only a session_id). The poll loop reads state["offset"]; a
+        # missing key crash-looped the daemon every ten seconds.
+        with open(self.path, "w") as f:
+            json.dump({"session_id": "abc"}, f)
+        self.assertEqual(core.load_session(self.path),
+                         {"offset": 0, "session_id": "abc"})
+
+    def test_a_file_that_is_not_an_object_gives_fresh_state(self):
+        with open(self.path, "w") as f:
+            json.dump([1, 2], f)
+        self.assertEqual(core.load_session(self.path),
+                         {"offset": 0, "session_id": None})
+
     def test_save_is_atomic_no_tmp_left_behind(self):
         core.save_session(self.path, {"offset": 1, "session_id": None})
         self.assertFalse(os.path.exists(self.path + ".tmp"))

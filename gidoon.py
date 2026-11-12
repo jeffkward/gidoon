@@ -483,11 +483,19 @@ def read_env(path):
 # ── session state ───────────────────────────────────────────────────────────
 
 def load_session(path):
+    """The session state, always with both keys. A host may write this
+    file first (a session_id only); the poll loop reads the offset, so a
+    missing key is filled rather than crash-looping the daemon."""
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            state = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
+        state = None
+    if not isinstance(state, dict):
         return {"offset": 0, "session_id": None}
+    state.setdefault("offset", 0)
+    state.setdefault("session_id", None)
+    return state
 
 
 def save_session(path, state):
