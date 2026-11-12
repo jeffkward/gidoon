@@ -174,6 +174,29 @@ class Blocks(Base):
         self.conv("> a\n\n> b",
                   "<blockquote>a</blockquote>\n\n<blockquote>b</blockquote>")
 
+    def test_a_plus_quote_run_is_one_expandable_quote(self):
+        # Telegram shows the first lines and opens the rest on a tap.
+        self.conv(">+ one\n>+\n>+ **two**\nafter",
+                  "<blockquote expandable>one\n\n<b>two</b></blockquote>"
+                  "\nafter")
+
+    def test_expandable_and_plain_quotes_stay_separate(self):
+        self.conv("> plain\n>+ more",
+                  "<blockquote>plain</blockquote>\n"
+                  "<blockquote expandable>more</blockquote>")
+
+    def test_an_empty_expandable_run_stays_literal(self):
+        self.conv(">+\n>+", "&gt;+\n&gt;+")
+
+    def test_an_expandable_quote_is_valid_telegram_html(self):
+        self.assertValidTelegramHtml(T(">+ a < b & *c*\n>+ `d`"))
+
+    def test_splitting_keeps_an_expandable_run_with_blank_lines_whole(self):
+        text = "intro\n\n" + "\n>+\n".join(f">+ item {k}" for k in range(5))
+        parts = r.split_markdown(text, 4096)
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(T(parts[0]).count("<blockquote expandable>"), 1)
+
     def test_headings_become_bold(self):
         self.conv("# Title\n### Sub *x*",
                   "<b>Title</b>\n<b>Sub <i>x</i></b>")

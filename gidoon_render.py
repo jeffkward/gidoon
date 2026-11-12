@@ -337,6 +337,9 @@ _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
 _BULLET = re.compile(r"^(\s*)[-*]\s+(?=\S)")
 _DIVIDER = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")   # ---, * * *
 _QUOTE = re.compile(r"^>\s?(.*)$")
+# `>+` lines: an expandable quote — Telegram shows its first lines and
+# opens the rest on a tap. Not Markdown; a plain `>` quote is unchanged.
+_EXPAND = re.compile(r"^>\+\s?(.*)$")
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 
 _CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(?=\S)(.+?)(?<=\S)(?<!`)\1(?!`)")
@@ -429,9 +432,23 @@ def to_telegram_html(text):
                 out.append("<pre>" + _esc("\n".join(lines[i:j])) + "</pre>")
                 i = j
                 continue
+        if _EXPAND.match(line):
+            j = i
+            while j < len(lines) and _EXPAND.match(lines[j]):
+                j += 1
+            body = [_EXPAND.match(l).group(1) for l in lines[i:j]]
+            if any(b.strip() for b in body):
+                out.append("<blockquote expandable>"
+                           + "\n".join(_inline(b) for b in body)
+                           + "</blockquote>")
+            else:
+                out.extend(_esc(l) for l in lines[i:j])
+            i = j
+            continue
         if _QUOTE.match(line):
             j = i
-            while j < len(lines) and _QUOTE.match(lines[j]):
+            while j < len(lines) and _QUOTE.match(lines[j]) \
+                    and not _EXPAND.match(lines[j]):
                 j += 1
             body = [_QUOTE.match(l).group(1) for l in lines[i:j]]
             if any(b.strip() for b in body):
