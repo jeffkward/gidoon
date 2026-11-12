@@ -119,6 +119,16 @@ class Taps(unittest.TestCase):
                                 "callback_data": "done"}]])
         self.assertEqual(self.d.state["offset"], 901)
 
+    def test_a_tap_is_logged_with_its_timing_but_never_its_words(self):
+        lines = []
+        with mock.patch.object(self.d, "log", side_effect=lines.append):
+            self.d.handle_update(tap("c:Save And Send"))
+        self.assertTrue(any(l.startswith("tap received (message 55)")
+                            for l in lines), lines)
+        self.assertTrue(any(l.startswith("tap: buttons cleared in ")
+                            and l.endswith(" ms") for l in lines), lines)
+        self.assertFalse(any("Save" in l for l in lines), lines)
+
     def test_a_double_tap_runs_one_turn(self):
         self.d.handle_update(tap("c:Save And Send"))
         self.d.handle_update(tap("c:Save And Send", cb_id="cb2"))

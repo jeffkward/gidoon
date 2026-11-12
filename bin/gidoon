@@ -1056,10 +1056,16 @@ class Daemon:
         if words is None or key in self._tapped:
             return
         self._tapped.add(key)
+        # When it arrived and how long Telegram took to clear the buttons:
+        # tells a slow poll queue from a slow Telegram. Never the words.
+        self.log(f"tap received (message {key})")
+        started = time.monotonic()
         try:
             self.tg.edit_markup(self.chat_id, key, [[{
                 "text": "✓ " + core.button_label(words),
                 "callback_data": "done"}]])
+            self.log("tap: buttons cleared in "
+                     f"{round((time.monotonic() - started) * 1000)} ms")
         except TgError as exc:
             self.log(f"tap: marking the choice failed ({exc.code})")
         try:
